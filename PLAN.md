@@ -9,16 +9,18 @@ Development roadmap for ASCII Game. Each milestone is a self-contained, shippabl
 **Goal:** Player can't see the whole map — only what's nearby and previously explored.
 
 ### Tasks
+- [ ] Generic Entity class (position, glyph, name, color, optional flags)
 - [ ] Field of view (FOV) — raycast from player, reveal tiles within line of sight
 - [ ] Fog of war — unseen tiles are black, explored-but-not-visible are dimmed
-- [ ] Item tiles (`$`) scattered on map in passable tiles
+- [ ] Item entities (`$`) spawned on map in passable tiles
 - [ ] Pickup interaction (press key to grab item underfoot)
 - [ ] Simple inventory display (press `i` to see what you're carrying)
 
 ### Design Notes
+- Entity class is the base for items, NPCs, and enemies later
+- Entity fields: `{x, y, glyph, name, color, blocking, visible}`
 - FOV radius: ~8 tiles (standard roguelike)
 - Explored tiles stay visible but dimmed (gray foreground instead of color)
-- Items are part of the map tile data, not separate entities yet
 - Inventory is a simple list — no stacks, no equip, no weight (yet)
 
 ---
