@@ -13,3 +13,7 @@ void Player::move(int dx, int dy, const Map& map) {
         y_ = ny;
     }
 }
+
+bool Player::can_move(int dx, int dy, const Map& map) const {
+    return map.is_passable(x_ + dx, y_ + dy);
+}

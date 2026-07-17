@@ -54,7 +54,7 @@ SDL_Texture* Renderer::get_glyph_texture(uint32_t glyph, uint8_t r, uint8_t g, u
 
     SDL_Color fg = {r, g, b, 255};
     std::string s(1, static_cast<char>(glyph));
-    SDL_Surface* surf = TTF_RenderText_Shaded(font_, s.c_str(), fg, {0, 0, 0, 255});
+    SDL_Surface* surf = TTF_RenderText_Blended(font_, s.c_str(), fg);
     if (!surf) return nullptr;
 
     SDL_Texture* tex = SDL_CreateTextureFromSurface(renderer_, surf);

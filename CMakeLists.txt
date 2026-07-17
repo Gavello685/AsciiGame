@@ -14,6 +14,8 @@ add_executable(ascii_game
     src/engine/renderer.cpp
     src/game/map.cpp
     src/game/player.cpp
+    src/game/entity.cpp
+    src/game/fov.cpp
 )
 
 target_include_directories(ascii_game PRIVATE

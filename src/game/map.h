@@ -16,6 +16,9 @@ public:
     Tile get(int x, int y) const;
     void set(int x, int y, TileType type);
 
+    void set_visible(int x, int y, bool v);
+    void set_explored(int x, int y, bool v);
+
     bool in_bounds(int x, int y) const;
     bool is_passable(int x, int y) const;
 

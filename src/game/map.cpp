@@ -74,13 +74,23 @@ void Map::generate(int width, int height, uint32_t seed) {
 }
 
 Tile Map::get(int x, int y) const {
-    if (!in_bounds(x, y)) return {TileType::Wall, false};
+    if (!in_bounds(x, y)) return {TileType::Wall, false, false};
     return tiles_[y * width_ + x];
 }
 
 void Map::set(int x, int y, TileType type) {
     if (!in_bounds(x, y)) return;
     tiles_[y * width_ + x].type = type;
+}
+
+void Map::set_visible(int x, int y, bool v) {
+    if (!in_bounds(x, y)) return;
+    tiles_[y * width_ + x].visible = v;
+}
+
+void Map::set_explored(int x, int y, bool v) {
+    if (!in_bounds(x, y)) return;
+    tiles_[y * width_ + x].explored = v;
 }
 
 bool Map::in_bounds(int x, int y) const {

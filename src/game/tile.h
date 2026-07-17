@@ -13,6 +13,7 @@ enum class TileType : uint8_t {
 struct Tile {
     TileType type = TileType::None;
     bool explored = false;
+    bool visible = false;
 };
 
 inline uint32_t tile_glyph(TileType t) {

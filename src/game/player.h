@@ -8,6 +8,7 @@ public:
 
     void spawn(int x, int y);
     void move(int dx, int dy, const Map& map);
+    bool can_move(int dx, int dy, const Map& map) const;
 
     int x() const { return x_; }
     int y() const { return y_; }
