@@ -76,31 +76,63 @@ int main(int argc, char* argv[]) {
     Player player;
     // Load chunks around origin first so spawn search has terrain to check
     world.update_loaded_chunks(0, 0);
-    // Find spawn point: walk outward from origin until we find passable terrain
+    // Guarantee a village exists at origin
+    {
+        Chunk* origin_chunk = world.get_chunk(0, 0);
+        if (origin_chunk && origin_chunk->structure_id() == 0) {
+            force_place_structure(*origin_chunk, 0, 0, StructureType::Village);
+            // Spawn village entities
+            world.spawn_structure_entities(*origin_chunk, 0, 0, StructureType::Village);
+        }
+    }
+    // Find spawn point: prefer a village, fall back to any passable tile
     {
         bool found = false;
-        for (int r = 0; r < 100 && !found; ++r) {
+
+        // Pass 1: search for a village structure within load radius
+        for (int r = 0; r <= world.load_radius() && !found; ++r) {
             for (int dy = -r; dy <= r && !found; ++dy) {
                 for (int dx = -r; dx <= r && !found; ++dx) {
                     if (std::abs(dx) != r && std::abs(dy) != r) continue;
-                    if (world.is_passable(dx, dy)) {
-                        player.spawn(dx, dy);
-                        found = true;
+                    int cx = World::world_to_chunk_x(dx);
+                    int cy = World::world_to_chunk_y(dy);
+                    Chunk* chunk = world.get_chunk(cx, cy);
+                    if (chunk && chunk->structure_id() == static_cast<int>(StructureType::Village)) {
+                        // Find a passable floor tile inside this chunk
+                        int base_wx = cx * CHUNK_SIZE;
+                        int base_wy = cy * CHUNK_SIZE;
+                        for (int ly = 0; ly < CHUNK_SIZE && !found; ++ly) {
+                            for (int lx = 0; lx < CHUNK_SIZE && !found; ++lx) {
+                                int wx = base_wx + lx;
+                                int wy = base_wy + ly;
+                                Tile t = world.get_tile(wx, wy);
+                                if (t.type == TileType::Floor && world.is_passable(wx, wy)) {
+                                    player.spawn(wx, wy);
+                                    found = true;
+                                }
+                            }
+                        }
                     }
                 }
             }
         }
-        // Guaranteed fallback: search again with no radius limit
+
+        // Pass 2: any passable tile near origin
         if (!found) {
-            for (int y = -500; y <= 500 && !found; ++y) {
-                for (int x = -500; x <= 500 && !found; ++x) {
-                    if (world.is_passable(x, y)) {
-                        player.spawn(x, y);
-                        found = true;
+            for (int r = 0; r < 100 && !found; ++r) {
+                for (int dy = -r; dy <= r && !found; ++dy) {
+                    for (int dx = -r; dx <= r && !found; ++dx) {
+                        if (std::abs(dx) != r && std::abs(dy) != r) continue;
+                        if (world.is_passable(dx, dy)) {
+                            player.spawn(dx, dy);
+                            found = true;
+                        }
                     }
                 }
             }
         }
+
+        // Guaranteed fallback
         if (!found) player.spawn(0, 0);
     }
     world.update_loaded_chunks(player.x(), player.y());
@@ -198,7 +230,6 @@ int main(int argc, char* argv[]) {
             {'r', "Rat", 160, 120, 80, 5, 2, 0, 3, 0, {}},
             {'g', "Goblin", 80, 180, 80, 12, 4, 1, 8, 1, make_drops("Gold Coin", 1)},
             {'g', "Goblin", 80, 180, 80, 12, 4, 1, 8, 1, make_drops("Rusty Key", 1)},
-            {'o', "Ogre", 200, 100, 60, 25, 7, 3, 20, 2, make_drops("Iron Sword", 1)},
             {'s', "Spider", 120, 120, 120, 8, 3, 0, 5, 1, make_drops("Health Potion", 1)},
             {'s', "Spider", 120, 120, 120, 8, 3, 0, 5, 1, {}},
             {'b', "Bat", 100, 100, 160, 4, 1, 0, 2, 0, {}},
@@ -339,7 +370,6 @@ int main(int argc, char* argv[]) {
                             {'r',"Rat",160,120,80,5,2,0,3},
                             {'g',"Goblin",80,180,80,12,4,1,8},
                             {'g',"Goblin",80,180,80,12,4,1,8},
-                            {'o',"Ogre",200,100,60,25,7,3,20},
                             {'s',"Spider",120,120,120,8,3,0,5},
                             {'b',"Bat",100,100,160,4,1,0,2},
                         };

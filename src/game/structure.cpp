@@ -227,3 +227,56 @@ bool try_place_structure(Chunk& chunk, int cx, int cy, uint32_t seed) {
 
     return true;
 }
+
+void force_place_structure(Chunk& chunk, int cx, int cy, StructureType type) {
+    (void)cx; (void)cy;
+    const StructureDef& def = structure_def(type);
+
+    // Center the structure in the chunk
+    int origin_lx = (CHUNK_SIZE - def.width) / 2;
+    int origin_ly = (CHUNK_SIZE - def.height) / 2;
+    if (origin_lx < 0) origin_lx = 0;
+    if (origin_ly < 0) origin_ly = 0;
+
+    stamp_structure(chunk, origin_lx, origin_ly, type);
+    chunk.set_structure_id(static_cast<int>(type));
+
+    // Clear terrain around the structure to Grass (removes trees, etc.)
+    int margin = 4;
+    int clear_x0 = origin_lx - margin;
+    int clear_y0 = origin_ly - margin;
+    int clear_x1 = origin_lx + def.width + margin;
+    int clear_y1 = origin_ly + def.height + margin;
+    for (int ly = clear_y0; ly < clear_y1; ++ly) {
+        for (int lx = clear_x0; lx < clear_x1; ++lx) {
+            if (!chunk.in_bounds(lx, ly)) continue;
+            Tile t = chunk.get(lx, ly);
+            // Only clear tiles that block movement (trees, mountains, etc.)
+            // Don't overwrite structure tiles or already-passable terrain
+            if (tile_blocks_movement(t.type) && t.type != TileType::Wall_Dungeon) {
+                chunk.set(lx, ly, TileType::Grass);
+            }
+        }
+    }
+
+    // Place torches where 'T' tiles are
+    for (int y = 0; y < def.height; ++y) {
+        for (int x = 0; x < def.width; ++x) {
+            if (def.tiles[y][x] == 'T') {
+                int lx = origin_lx + x;
+                int ly = origin_ly + y;
+                if (chunk.in_bounds(lx, ly)) {
+                    PlacedObject torch;
+                    torch.local_x = lx;
+                    torch.local_y = ly;
+                    torch.glyph = '*';
+                    torch.name = "Wall Torch";
+                    torch.fg_r = 255; torch.fg_g = 200; torch.fg_b = 50;
+                    torch.is_light = true;
+                    torch.light_radius = 5;
+                    chunk.add_placed_object(torch);
+                }
+            }
+        }
+    }
+}

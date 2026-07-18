@@ -37,5 +37,8 @@ const StructureDef& structure_def(StructureType type);
 // Try to place a structure in a chunk (returns true if placed)
 bool try_place_structure(Chunk& chunk, int cx, int cy, uint32_t seed);
 
+// Force-place a structure in a chunk (always succeeds)
+void force_place_structure(Chunk& chunk, int cx, int cy, StructureType type);
+
 // Stamp structure tiles into chunk at local origin
 void stamp_structure(Chunk& chunk, int origin_lx, int origin_ly, StructureType type);

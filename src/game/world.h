@@ -134,6 +134,9 @@ public:
     // Fix entities that moved across chunk boundaries during AI update
     void rekey_entities();
 
+    // Spawn entities for a structure (used on first visit + forced spawn)
+    void spawn_structure_entities(Chunk& chunk, int cx, int cy, StructureType stype);
+
     // Per-chunk save/load support
     struct ChunkSaveData {
         int cx, cy;
@@ -165,5 +168,4 @@ private:
 
     // Helpers for first-visit chunk setup
     void spawn_biome_entities(Chunk& chunk, int cx, int cy);
-    void spawn_structure_entities(Chunk& chunk, int cx, int cy, StructureType stype);
 };
