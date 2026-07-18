@@ -12,10 +12,22 @@ add_executable(ascii_game
     src/main.cpp
     src/engine/window.cpp
     src/engine/renderer.cpp
-    src/game/map.cpp
     src/game/player.cpp
     src/game/entity.cpp
     src/game/fov.cpp
+    src/game/npc.cpp
+    src/game/item.cpp
+    src/game/dialogue.cpp
+    src/game/trade.cpp
+    src/game/enemy.cpp
+    src/game/save.cpp
+    src/game/noise.cpp
+    src/game/chunk.cpp
+    src/game/world.cpp
+    src/game/time_system.cpp
+    src/game/light.cpp
+    src/game/biome.cpp
+    src/game/structure.cpp
 )
 
 target_include_directories(ascii_game PRIVATE

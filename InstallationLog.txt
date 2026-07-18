@@ -1,0 +1,25 @@
+************************************* Invoked: Fri Jul 17 08:39:32 2026
+[0] Arguments: C:\Users\gavel\AppData\Local\Temp\msys2-installer.exe, in, --confirm-output, --launch-command, '', -o, C:\msys64
+[3] Operations sanity check succeeded.
+[8] Using metadata cache from "C:/Users/gavel/AppData/Local/cache\\qt-installer-framework\\d75f1c19-3379-3717-ae8d-1404b51494a9"
+[8] Found 0 cached items.
+[11] Loaded control script ":/metadata/installer-config/control_js.js"
+[11] No target directory specified, using default value: ""
+[11] Warning: The installation path cannot be empty, please specify a valid directory.
+************************************* Invoked: Fri Jul 17 08:55:28 2026
+[0] Arguments: C:\Users\gavel\AppData\Local\Temp\WinGet\MSYS2.MSYS2.20260611\msys2-x86_64-20260611.exe, install, --confirm-command, --root, C:\msys64
+[13] Operations sanity check succeeded.
+[17] Warning: Cannot initialize cache: Cannot create lock file \"C:\\Users\\gavel\\AppData\\Local\\cache\\qt-installer-framework\\d75f1c19-3379-3717-ae8d-1404b51494a9\\cache.lock\": The process cannot access the file because it is being used by another process.\r\n (0x00000020)
+[32] Loaded control script ":/metadata/installer-config/control_js"
+[32] OverwriteTargetDirectory : Warning : You have selected an existing, non-empty directory for installation.
+Note that it will be completely wiped on uninstallation of this application.
+It is not advisable to install into this directory as installation might fail.
+Do you want to continue? Yes|No
+[50894] Invalid answer, please retry
+************************************* Invoked: Fri Jul 17 08:56:31 2026
+[0] Arguments: C:\Users\gavel\AppData\Local\Temp\WinGet\MSYS2.MSYS2.20260611\msys2-x86_64-20260611.exe, install, --confirm-command, --root, C:\msys64
+[15] Operations sanity check succeeded.
+[17] Using metadata cache from "C:/Users/gavel/AppData/Local/cache\\qt-installer-framework\\d75f1c19-3379-3717-ae8d-1404b51494a9"
+[17] Found 0 cached items.
+[21] Loaded control script ":/metadata/installer-config/control_js"
+[21] TargetDirectoryInUse : Error : The directory you selected already exists and contains an installation. Choose a different target for installation.
