@@ -7,6 +7,11 @@
 #include <utility>
 
 class World;
+class Enemy;
+
+// Create an enemy of a known type with default stats and drops.
+// Unknown names produce a Rat.
+Enemy make_enemy(const std::string& name, int x, int y);
 
 enum class EnemyState : uint8_t {
     Idle,
@@ -45,6 +50,14 @@ public:
     bool check_death();
 
     const std::vector<std::pair<Item, int>>& drops() const { return drops_; }
+
+    // Night predators see in the dark and hit harder at night.
+    // Derived from name so no extra save data is needed.
+    bool night_predator() const;
+
+    // Restore default loot drops for this enemy's type (used on load,
+    // since drops are not serialized).
+    void assign_default_drops();
 
     void update(World& world, int player_x, int player_y);
 

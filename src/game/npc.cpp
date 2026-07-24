@@ -55,16 +55,8 @@ GiftReaction Npc::react_to_gift(const Item& item) const {
     else if (value >= 3) base = GiftReaction::Dislike;
     else base = GiftReaction::Hate;
 
-    // Personality modifiers
-    // Merchants love high-value, hate junk
-    if (is_merchant_) {
-        if (value >= 50) return GiftReaction::Love;
-        if (value >= 20) return GiftReaction::Like;
-        if (value >= 5) return GiftReaction::Neutral;
-        return GiftReaction::Dislike;
-    }
-
-    // Check item type preferences based on NPC name
+    // Personality modifiers — name-specific tastes take priority
+    // over the generic merchant behavior below.
     if (name_ == "Child") {
         // Children love shiny things (gold, rings) and food
         if (item.glyph() == '=' || item.glyph() == '$') return GiftReaction::Love;
@@ -87,6 +79,46 @@ GiftReaction Npc::react_to_gift(const Item& item) const {
         if (item.type() == ItemType::Consumable) return GiftReaction::Like;
         if (value >= 80) return GiftReaction::Dislike; // too fancy
         return base;
+    }
+
+    if (name_ == "Guard") {
+        // Guards appreciate weapons, shields, and practical gear
+        if (item.type() == ItemType::Equipment && item.attack() > 0) return GiftReaction::Like;
+        if (item.type() == ItemType::Equipment && item.defense() > 0) return GiftReaction::Like;
+        if (item.name() == "Torch" || item.name() == "Lantern") return GiftReaction::Like;
+        return base;
+    }
+
+    if (name_ == "Blacksmith") {
+        // Blacksmiths love raw materials and fine craftsmanship
+        if (item.type() == ItemType::Material) return GiftReaction::Love;
+        if (item.type() == ItemType::Equipment && value >= 60) return GiftReaction::Like;
+        return base;
+    }
+
+    if (name_ == "Farmer") {
+        // Farmers love food and humble, useful things
+        if (item.type() == ItemType::Consumable) return GiftReaction::Love;
+        if (item.name() == "Wood" || item.name() == "Stone") return GiftReaction::Like;
+        if (value >= 80) return GiftReaction::Dislike; // too fancy for the farm
+        return base;
+    }
+
+    if (name_ == "Herbalist") {
+        // Herbalists love potions and ingredients
+        if (item.type() == ItemType::Consumable && item.use_effect() == UseEffect::Heal)
+            return GiftReaction::Love;
+        if (item.type() == ItemType::Consumable) return GiftReaction::Like;
+        if (item.type() == ItemType::Equipment && item.attack() > 0) return GiftReaction::Dislike;
+        return base;
+    }
+
+    // Generic merchants love high-value, hate junk
+    if (is_merchant_) {
+        if (value >= 50) return GiftReaction::Love;
+        if (value >= 20) return GiftReaction::Like;
+        if (value >= 5) return GiftReaction::Neutral;
+        return GiftReaction::Dislike;
     }
 
     // Villagers: love food, neutral on most things

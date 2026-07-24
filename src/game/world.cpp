@@ -27,7 +27,13 @@ void World::update_loaded_chunks(int player_world_x, int player_world_y) {
                 Chunk& chunk = chunks_[key];
                 chunk.mark_visited();
                 // Try to place a structure in this chunk
-                if (try_place_structure(chunk, cx, cy, seed_)) {
+                bool placed = try_place_structure(chunk, cx, cy, seed_);
+                // The origin chunk always holds a village (deterministic —
+                // guarantees it regenerates identically on save/load)
+                if (!placed && cx == 0 && cy == 0) {
+                    force_place_structure(chunk, 0, 0, StructureType::Village);
+                    spawn_structure_entities(chunk, 0, 0, StructureType::Village);
+                } else if (placed) {
                     // Determine structure type from biome for entity spawning
                     BiomeType biome = static_cast<BiomeType>(chunk.biome_id());
                     float type_noise = noise::fractal2d(
@@ -235,6 +241,17 @@ void World::add_placed_object(int world_x, int world_y, const PlacedObject& obj)
     local_obj.local_x = lx;
     local_obj.local_y = ly;
     chunk->add_placed_object(local_obj);
+}
+
+const PlacedObject* World::placed_object_at(int world_x, int world_y) const {
+    int cx, cy, lx, ly;
+    world_to_chunk(world_x, world_y, cx, cy, lx, ly);
+    const Chunk* chunk = get_chunk(cx, cy);
+    if (!chunk) return nullptr;
+    for (const auto& obj : chunk->placed_objects()) {
+        if (obj.local_x == lx && obj.local_y == ly) return &obj;
+    }
+    return nullptr;
 }
 
 std::vector<World::ChunkSaveData> World::gather_save_data() const {
@@ -502,12 +519,55 @@ StructureType World::get_structure_at(int world_x, int world_y) const {
     return static_cast<StructureType>(chunk->structure_id());
 }
 
+// ── Zones ─────────────────────────────────────────────────────────
+
+void World::add_zone(const Zone& z) {
+    zones_.push_back(z);
+}
+
+bool World::remove_zone_at(int wx, int wy) {
+    for (auto it = zones_.begin(); it != zones_.end(); ++it) {
+        if (it->contains(wx, wy)) {
+            zones_.erase(it);
+            return true;
+        }
+    }
+    return false;
+}
+
+const Zone* World::zone_at(int wx, int wy) const {
+    for (const auto& z : zones_) {
+        if (z.contains(wx, wy)) return &z;
+    }
+    return nullptr;
+}
+
 // ── Entity spawning for new chunks ────────────────────────────────
 
 void World::spawn_biome_entities(Chunk& chunk, int cx, int cy) {
     BiomeType biome = static_cast<BiomeType>(chunk.biome_id());
     int base_wx = cx * CHUNK_SIZE;
     int base_wy = cy * CHUNK_SIZE;
+
+    // Per-biome spawn tables (weighted by repetition)
+    static const char* grassland_spawns[] = {"Rat", "Rat", "Snake", "Bandit"};
+    static const char* forest_spawns[]    = {"Spider", "Spider", "Wolf", "Goblin"};
+    static const char* desert_spawns[]    = {"Scorpion", "Scorpion", "Snake", "Bandit"};
+    static const char* swamp_spawns[]     = {"Frog", "Frog", "Snake", "Zombie"};
+    static const char* mountain_spawns[]  = {"Goblin", "Goblin", "Bat", "Troll"};
+    static const char* tundra_spawns[]    = {"Wolf", "Wolf", "Bat", "Yeti"};
+
+    const char** table = grassland_spawns;
+    int table_size = 4;
+    switch (biome) {
+        case BiomeType::Grassland: table = grassland_spawns; break;
+        case BiomeType::Forest:    table = forest_spawns;    break;
+        case BiomeType::Desert:    table = desert_spawns;    break;
+        case BiomeType::Swamp:     table = swamp_spawns;     break;
+        case BiomeType::Mountain:  table = mountain_spawns;  break;
+        case BiomeType::Tundra:    table = tundra_spawns;    break;
+        default: break;
+    }
 
     // Spawn 2-4 enemies per chunk based on biome
     int count = 2 + static_cast<int>(noise::normalize(
@@ -529,35 +589,13 @@ void World::spawn_biome_entities(Chunk& chunk, int cx, int cy) {
 
         if (attempts >= 20) continue;
 
-        // Pick enemy type based on biome
-        Enemy* e = nullptr;
-        switch (biome) {
-            case BiomeType::Grassland:
-                e = new Enemy(ex, ey, 'r', "Rat", 160, 120, 80, 5, 5, 2, 0, 3, 0, {});
-                break;
-            case BiomeType::Forest:
-                e = new Enemy(ex, ey, 's', "Spider", 120, 120, 120, 8, 8, 3, 0, 5, 1, {});
-                break;
-            case BiomeType::Desert:
-                e = new Enemy(ex, ey, 's', "Scorpion", 180, 140, 60, 6, 6, 3, 0, 4, 1, {});
-                break;
-            case BiomeType::Swamp:
-                e = new Enemy(ex, ey, 'f', "Frog", 60, 160, 60, 4, 4, 1, 0, 2, 0, {});
-                break;
-            case BiomeType::Mountain:
-                e = new Enemy(ex, ey, 'g', "Goblin", 80, 180, 80, 12, 12, 4, 1, 8, 1, {});
-                break;
-            case BiomeType::Tundra:
-                e = new Enemy(ex, ey, 'w', "Wolf", 160, 160, 160, 10, 10, 4, 1, 7, 1, {});
-                break;
-            default:
-                e = new Enemy(ex, ey, 'r', "Rat", 160, 120, 80, 5, 5, 2, 0, 3, 0, {});
-                break;
-        }
-        if (e) {
-            spawn_enemy(std::move(*e));
-            delete e;
-        }
+        // Deterministic pick from the biome's spawn table
+        float pick = noise::fractal2d(static_cast<float>(cx) * 6.0f + i * 77.0f + 10000.0f,
+                                      static_cast<float>(cy) * 6.0f + i * 77.0f + 10000.0f, 1, 0.5f);
+        int idx = static_cast<int>(noise::normalize(pick) * table_size);
+        if (idx >= table_size) idx = table_size - 1;
+
+        spawn_enemy(make_enemy(table[idx], ex, ey));
     }
 }
 
@@ -583,35 +621,46 @@ void World::spawn_structure_entities(Chunk& chunk, int cx, int cy, StructureType
         if (attempts >= 30) continue;
 
         if (se.type == "npc") {
-            if (se.name == "Merchant") {
+            auto stock = [&](std::initializer_list<std::pair<const char*, int>> items) {
                 std::vector<std::pair<Item, int>> shop;
-                auto add = [&](const char* n, int qty) {
+                for (const auto& [n, qty] : items) {
                     const Item* it = find_item(n);
                     if (it) shop.emplace_back(*it, qty);
-                };
-                add("Bread", 10); add("Health Potion", 5); add("Iron Sword", 3);
-                add("Leather Armor", 2); add("Hood", 3);
+                }
+                return shop;
+            };
+
+            if (se.name == "Merchant") {
                 spawn_npc(Npc(ex, ey, 'm', "Merchant", 220, 180, 60, true, 60,
-                              build_merchant_dialogue(), shop));
+                              build_merchant_dialogue(),
+                              stock({{"Bread", 10}, {"Health Potion", 5}, {"Iron Sword", 3},
+                                     {"Leather Armor", 2}, {"Hood", 3}, {"Torch", 4},
+                                     {"Water Skin", 5}, {"Wooden Shield", 3}})));
             } else if (se.name == "Villager") {
                 spawn_npc(Npc(ex, ey, 'v', "Villager", 140, 200, 140, false, 30,
                               build_villager_dialogue(), {}));
+            } else if (se.name == "Guard") {
+                spawn_npc(Npc(ex, ey, 'g', "Guard", 100, 140, 220, false, 40,
+                              build_guard_dialogue(), {}));
+            } else if (se.name == "Blacksmith") {
+                spawn_npc(Npc(ex, ey, 'b', "Blacksmith", 220, 120, 60, true, 50,
+                              build_blacksmith_dialogue(),
+                              stock({{"Iron Sword", 3}, {"Steel Sword", 1}, {"Spear", 3},
+                                     {"Battle Axe", 1}, {"Iron Shield", 2}, {"Steel Shield", 1},
+                                     {"Chain Mail", 1}, {"Steel Helm", 1}, {"Gauntlets", 2},
+                                     {"Woodcutter's Axe", 2}, {"Pickaxe", 2}, {"Iron Rod", 5}})));
+            } else if (se.name == "Farmer") {
+                spawn_npc(Npc(ex, ey, 'f', "Farmer", 100, 180, 80, false, 40,
+                              build_farmer_dialogue(), {}));
+            } else if (se.name == "Herbalist") {
+                spawn_npc(Npc(ex, ey, 'h', "Herbalist", 180, 120, 200, true, 50,
+                              build_herbalist_dialogue(),
+                              stock({{"Health Potion", 8}, {"Greater Health Potion", 2},
+                                     {"Water Skin", 6}, {"Bread", 6}, {"Apple", 8},
+                                     {"Cheese", 4}, {"Cooked Meat", 3}})));
             }
         } else if (se.type == "enemy") {
-            Enemy* e = nullptr;
-            if (se.name == "Goblin") {
-                e = new Enemy(ex, ey, 'g', "Goblin", 80, 180, 80, 12, 12, 4, 1, 8, 1, {});
-            } else if (se.name == "Rat") {
-                e = new Enemy(ex, ey, 'r', "Rat", 160, 120, 80, 5, 5, 2, 0, 3, 0, {});
-            } else if (se.name == "Ogre") {
-                e = new Enemy(ex, ey, 'o', "Ogre", 200, 100, 60, 25, 25, 7, 3, 20, 2, {});
-            } else if (se.name == "Spider" || se.name == "Giant Spider") {
-                e = new Enemy(ex, ey, 's', "Spider", 120, 120, 120, 8, 8, 3, 0, 5, 1, {});
-            }
-            if (e) {
-                spawn_enemy(std::move(*e));
-                delete e;
-            }
+            spawn_enemy(make_enemy(se.name, ex, ey));
         }
     }
 }

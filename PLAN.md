@@ -65,20 +65,20 @@ Split into 4 sub-milestones for incremental delivery.
 **Goal:** Infinite overworld with seamless chunk loading, dirty-chunk persistence, and unbounded camera.
 
 #### New Files
-- [ ] `src/game/chunk.h/.cpp` — Chunk class (64×64 tile grid, biome ID, dirty flag, sparse modification map)
-- [ ] `src/game/world.h/.cpp` — World class (chunk map, load/unload rings, coordinate conversion, entity queries)
-- [ ] `src/game/noise.h/.cpp` — Simplex noise (seed-based, deterministic, 1D/2D)
+- [x] `src/game/chunk.h/.cpp` — Chunk class (64×64 tile grid, biome ID, dirty flag, sparse modification map)
+- [x] `src/game/world.h/.cpp` — World class (chunk map, load/unload rings, coordinate conversion, entity queries)
+- [x] `src/game/noise.h/.cpp` — Simplex noise (seed-based, deterministic, 1D/2D)
 
 #### Modified Files
-- [ ] `tile.h` — Add `uint8_t light_level` to Tile. Add new TileTypes: Grass, Dirt, Sand, Snow, Stone, Tree, TallGrass, Mountain, DeepWater
-- [ ] `map.h/.cpp` — Remove or gut (replaced by World)
-- [ ] `player.h/.cpp` — `move()`/`can_move()` take `World&` instead of `const Map&`
-- [ ] `enemy.h/.cpp` — `update()`/`chase_player()`/`can_move_to()` take `World&`
-- [ ] `npc.h/.cpp` — `update()`/`can_move_to()` take `World&`
-- [ ] `fov.h/.cpp` — `compute()` takes `World&`, raycasts across chunk boundaries
-- [ ] `save.h/.cpp` — Save/load chunk state (tile deltas + entity lists per chunk)
-- [ ] `main.cpp` — Replace `Map map` with `World world`, unbounded camera, entity spawning via World
-- [ ] `CMakeLists.txt` — Add new .cpp files
+- [x] `tile.h` — Add `uint8_t light_level` to Tile. Add new TileTypes: Grass, Dirt, Sand, Snow, Stone, Tree, TallGrass, Mountain, DeepWater
+- [x] `map.h/.cpp` — Remove or gut (replaced by World)
+- [x] `player.h/.cpp` — `move()`/`can_move()` take `World&` instead of `const Map&`
+- [x] `enemy.h/.cpp` — `update()`/`chase_player()`/`can_move_to()` take `World&`
+- [x] `npc.h/.cpp` — `update()`/`can_move_to()` take `World&`
+- [x] `fov.h/.cpp` — `compute()` takes `World&`, raycasts across chunk boundaries
+- [x] `save.h/.cpp` — Save/load chunk state (tile deltas + entity lists per chunk)
+- [x] `main.cpp` — Replace `Map map` with `World world`, unbounded camera, entity spawning via World
+- [x] `CMakeLists.txt` — Add new .cpp files
 
 #### Chunk Loading
 - 5×5 loaded chunks (320×320 tiles in memory)
@@ -113,7 +113,7 @@ Split into 4 sub-milestones for incremental delivery.
 - [x] `fov.h/.cpp` — Tiles with `effective_light == 0` invisible, `< 4` dim, `>= 4` visible with color scaling
 - [x] `item.h/.cpp` — New items: Torch (Hand, radius 5, burns out), Lantern (Hand, radius 7, permanent), Campfire Kit (placeable, radius 4)
 - [x] `main.cpp` — Light-level color scaling in render, HUD time/torch display, night overlay
-- [ ] `enemy.h/.cpp` — Some enemies ignore darkness, some stronger at night
+- [x] `enemy.h/.cpp` — Some enemies ignore darkness, some stronger at night
 
 #### Light Sources
 - Player torch: always centered on player, not stored in chunk
@@ -135,20 +135,20 @@ Split into 4 sub-milestones for incremental delivery.
 
 ---
 
-### Sub-milestone 4C: Biomes & Structures
+### Sub-milestone 4C: Biomes & Structures ✅
 
 **Goal:** 6+ biomes with transitions, structure stamps, embedded dungeons.
 
 #### New Files
-- [ ] `src/game/biome.h/.cpp` — Biome enum, per-biome config (terrain, enemies, structures, colors)
-- [ ] `src/game/structure.h/.cpp` — Structure templates, stamping into chunks
+- [x] `src/game/biome.h/.cpp` — Biome enum, per-biome config (terrain, enemies, structures, colors)
+- [x] `src/game/structure.h/.cpp` — Structure templates, stamping into chunks
 
 #### Modified Files
-- [ ] `chunk.h/.cpp` — Store biome_id, structure_id
-- [ ] `world.h/.cpp` — Biome assignment (noise-based), structure placement, per-chunk entity spawning
-- [ ] `tile.h` — New TileTypes: Floor, Wall_Dungeon, Door_Stone, Trap, Stairs_Down, Stairs_Up
-- [ ] `item.h/.cpp` — New materials: Wood Plank, Stone Block, Iron Rod
-- [ ] `main.cpp` — HUD biome indicator, structure discovery messages
+- [x] `chunk.h/.cpp` — Store biome_id, structure_id
+- [x] `world.h/.cpp` — Biome assignment (noise-based), structure placement, per-chunk entity spawning
+- [x] `tile.h` — New TileTypes: Floor, Wall_Dungeon, Door_Stone, Trap, Stairs_Down, Stairs_Up
+- [x] `item.h/.cpp` — New materials: Wood Plank, Stone Block, Iron Rod
+- [x] `main.cpp` — HUD biome indicator, structure discovery messages
 
 #### Biomes
 - Grassland (grass, tall grass, scattered trees, ponds)
@@ -170,34 +170,34 @@ Split into 4 sub-milestones for incremental delivery.
 
 ---
 
-### Sub-milestone 4D: Building System
+### Sub-milestone 4D: Building System ✅
 
 **Goal:** Freeform tile placement + zone designation, full persistence.
 
 #### New Files
-- [ ] `src/game/building.h/.cpp` — Build mode state, zone definitions, placement logic
+- [x] `src/game/building.h/.cpp` — Build mode state, zone definitions, placement logic
 
 #### Modified Files
-- [ ] `main.cpp` — BuildingMode/ZoneMode in GameMode enum, overlay UIs
-- [ ] `item.h/.cpp` — New placeables: Wood Wall, Stone Floor, Wooden Door, Iron Door, Torch, Campfire
-- [ ] `world.h/.cpp` — `place_tile()`, zone storage
+- [x] `main.cpp` — BuildingMode/ZoneMode in GameMode enum, overlay UIs
+- [x] `item.h/.cpp` — New placeables: Wood Wall, Stone Floor, Wooden Door, Torch Post, Campfire
+- [x] `world.h/.cpp` — `place_tile()`, zone storage
 
 #### Freeform Building
-- Press B → build mode, cursor moves, Enter places, Tab cycles tiles
-- Consumes materials from inventory
-- Placed tiles added to chunk dirty delta
+- Press B → build mode, cursor moves, Enter places, Tab cycles tiles ✅
+- Consumes materials from inventory ✅
+- Placed tiles added to chunk dirty delta ✅
 
 #### Zone Designation
-- Press Z → zone mode, rectangular selection, zone type picker
-- Zone types: Farm, Storage, Barracks, Bed
-- Zones saved per-chunk
+- Press Z → zone mode, rectangular selection, zone type picker ✅
+- Zone types: Farm, Storage, Barracks, Bed ✅
+- Zones saved in save file (world-space rects) ✅
 
 #### Adjustable Render/Simulation Distance
-- [ ] `src/game/settings.h/.cpp` — Settings management, JSON serialization
-- [ ] Pause menu → Settings option
-- Three sliders: Chunk Load Radius (2-4), Render Distance (1-4), Simulation Distance (1-3)
-- Constraints: load >= render + 1, render >= simulation
-- Settings saved to `%APPDATA%/AsciiGame/settings.json`
+- [x] `src/game/settings.h/.cpp` — Settings management, JSON serialization
+- [x] Pause menu → Settings option
+- Three sliders: Chunk Load Radius (2-4), Render Distance (1-4), Simulation Distance (1-3) ✅
+- Constraints: load >= render + 1, render >= simulation (enforced by World setters) ✅
+- Settings saved to `%APPDATA%/AsciiGame/settings.json` ✅
 
 ---
 
@@ -213,8 +213,8 @@ Split into 4 sub-milestones for incremental delivery.
 - [ ] Status indicators in UI (hungry, thirsty, tired)
 - [ ] NPC settlers who arrive periodically
 - [ ] Settlers auto-assigned to zones
-- [ ] Resource gathering (chop trees, mine stone)
-- [ ] Simple construction from materials
+- [x] Resource gathering (chop trees, mine stone) — done in 4D pass (bump trees/mountains; tools double yield)
+- [x] Simple construction from materials — done in 4D pass (build mode + crafting)
 
 ---
 

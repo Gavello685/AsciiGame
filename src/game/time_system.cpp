@@ -2,7 +2,11 @@
 #include <cmath>
 
 void TimeSystem::advance() {
-    turn_ = (turn_ + 1) % CYCLE_LENGTH;
+    turn_++;
+    if (turn_ >= CYCLE_LENGTH) {
+        turn_ = 0;
+        day_++;
+    }
 }
 
 TimeOfDay TimeSystem::time_of_day() const {

@@ -12,16 +12,20 @@
 #include "game/save.h"
 #include "game/time_system.h"
 #include "game/light.h"
+#include "game/building.h"
+#include "game/crafting.h"
+#include "game/settings.h"
 #include <iostream>
 #include <string>
 #include <vector>
+#include <set>
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
 #include <ctime>
 
 static const int FONT_SIZE = 20;
-static const int FOV_RADIUS = 8;
+static const int BUILD_RANGE = 6;
 
 static const char* slot_names[] = {
     "None", "Head", "L Shoulder", "R Shoulder", "Torso",
@@ -30,6 +34,7 @@ static const char* slot_names[] = {
 };
 
 enum class GameMode {
+    MainMenu,
     Normal,
     Inventory,
     InventoryAction,
@@ -40,6 +45,11 @@ enum class GameMode {
     PauseMenu,
     SaveGame,
     LoadGame,
+    Settings,
+    Craft,
+    Build,
+    Zone,
+    Character,
 };
 
 static void draw_string(Renderer& r, int x, int y, const std::string& s,
@@ -54,9 +64,22 @@ static void draw_string(Renderer& r, int x, int y, const std::string& s,
     }
 }
 
+// Draw a filled overlay box
+static void draw_box(Renderer& r, int x, int y, int w, int h,
+                     uint8_t br, uint8_t bg, uint8_t bb) {
+    for (int yy = y; yy < y + h; ++yy)
+        for (int xx = x; xx < x + w; ++xx) {
+            Cell c; c.glyph = ' ';
+            c.bg_r = br; c.bg_g = bg; c.bg_b = bb;
+            r.set_cell(xx, yy, c);
+        }
+}
+
 int main(int argc, char* argv[]) {
-    (void)argc;
-    (void)argv;
+    std::srand(static_cast<unsigned>(std::time(nullptr)));
+
+    // Dev tool: --demo runs a scripted UI walkthrough, writing BMP screenshots
+    bool demo_mode = (argc > 1 && std::string(argv[1]) == "--demo");
 
     Window window;
     if (!window.init({"ASCII Game", 1024, 768})) return 1;
@@ -68,28 +91,106 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
+    // --- Persistent settings ---
+    Settings settings;
+    load_settings(settings);
+
     // --- Game state ---
-    uint32_t map_seed = static_cast<uint32_t>(std::time(nullptr));
+    uint32_t map_seed = 0;
     World world;
-    world.init(map_seed);
-
     Player player;
-    // Load chunks around origin first so spawn search has terrain to check
-    world.update_loaded_chunks(0, 0);
-    // Guarantee a village exists at origin
-    {
-        Chunk* origin_chunk = world.get_chunk(0, 0);
-        if (origin_chunk && origin_chunk->structure_id() == 0) {
-            force_place_structure(*origin_chunk, 0, 0, StructureType::Village);
-            // Spawn village entities
-            world.spawn_structure_entities(*origin_chunk, 0, 0, StructureType::Village);
-        }
-    }
-    // Find spawn point: prefer a village, fall back to any passable tile
-    {
-        bool found = false;
+    TimeSystem time_system;
 
-        // Pass 1: search for a village structure within load radius
+    bool running = true;
+    bool game_started = false;
+    SDL_Event event;
+    bool need_fov_update = false;
+    bool player_took_turn = false;
+
+    GameMode mode = GameMode::MainMenu;
+    int menu_cursor = 0;
+    bool load_from_menu = false;
+
+    int inv_cursor = 0;
+    int inv_action_cursor = 0;
+    int gift_cursor = 0;
+    GameMode gift_return = GameMode::Normal;
+    int dialogue_npc_x = -1, dialogue_npc_y = -1;
+    int dialogue_node = 0;
+    int dialogue_option = 0;
+    TradeState trade_state;
+    int equip_slot_cursor = 0;
+
+    static const EquipSlot equip_slots[] = {
+        EquipSlot::Head, EquipSlot::Shoulder_L, EquipSlot::Shoulder_R,
+        EquipSlot::Torso, EquipSlot::Arm_L, EquipSlot::Arm_R,
+        EquipSlot::Hand_L, EquipSlot::Hand_R, EquipSlot::Leg_L,
+        EquipSlot::Leg_R, EquipSlot::Foot_L, EquipSlot::Foot_R,
+    };
+    static const int NUM_EQUIP_SLOTS = 12;
+
+    Item examine_item;
+
+    // Message log (newest at back)
+    struct Msg { std::string text; int timer; };
+    std::vector<Msg> msg_log;
+    auto log_msg = [&](const std::string& s, int timer = 90) {
+        msg_log.push_back({s, timer});
+        if (msg_log.size() > 4) msg_log.erase(msg_log.begin());
+    };
+
+    int turn_counter = 0;
+    int play_time_seconds = 0;
+    int play_time_timer = 0;
+
+    // Pause menu state
+    int pause_cursor = 0;
+
+    // Settings screen state
+    int settings_cursor = 0;
+
+    // Build mode state
+    int build_cx = 0, build_cy = 0;
+    int build_sel = 0;
+
+    // Zone mode state
+    int zone_cx = 0, zone_cy = 0;
+    int zone_ax = 0, zone_ay = 0;
+    bool zone_anchored = false;
+    bool zone_pick_type = false;
+    int zone_type_sel = 0;
+
+    // Craft mode state
+    int craft_cursor = 0;
+
+    // Structure discovery (chunk coords of discovered structures)
+    std::set<std::pair<int,int>> discovered_structures;
+
+    // Check equipment by name (any slot)
+    auto has_equipped = [&](const char* name) {
+        for (const auto& [slot, item] : player.equipment()) {
+            if (item.name() == name) return true;
+        }
+        return false;
+    };
+
+    // ── New game initialization ────────────────────────────────────
+    auto start_new_game = [&]() {
+        map_seed = static_cast<uint32_t>(std::time(nullptr)) + static_cast<uint32_t>(std::rand());
+        world = World();
+        world.init(map_seed);
+        world.set_load_radius(settings.load_radius);
+        world.set_render_radius(settings.render_radius);
+        world.set_simulation_radius(settings.sim_radius);
+
+        player = Player();
+        time_system = TimeSystem();
+
+        // Load chunks around origin (origin chunk always holds a village)
+        world.update_loaded_chunks(0, 0);
+
+        // Find spawn point: prefer village floor, fall back to any passable tile
+        bool found = false;
         for (int r = 0; r <= world.load_radius() && !found; ++r) {
             for (int dy = -r; dy <= r && !found; ++dy) {
                 for (int dx = -r; dx <= r && !found; ++dx) {
@@ -98,7 +199,6 @@ int main(int argc, char* argv[]) {
                     int cy = World::world_to_chunk_y(dy);
                     Chunk* chunk = world.get_chunk(cx, cy);
                     if (chunk && chunk->structure_id() == static_cast<int>(StructureType::Village)) {
-                        // Find a passable floor tile inside this chunk
                         int base_wx = cx * CHUNK_SIZE;
                         int base_wy = cy * CHUNK_SIZE;
                         for (int ly = 0; ly < CHUNK_SIZE && !found; ++ly) {
@@ -116,8 +216,6 @@ int main(int argc, char* argv[]) {
                 }
             }
         }
-
-        // Pass 2: any passable tile near origin
         if (!found) {
             for (int r = 0; r < 100 && !found; ++r) {
                 for (int dy = -r; dy <= r && !found; ++dy) {
@@ -131,263 +229,208 @@ int main(int argc, char* argv[]) {
                 }
             }
         }
-
-        // Guaranteed fallback
         if (!found) player.spawn(0, 0);
-    }
-    world.update_loaded_chunks(player.x(), player.y());
+        world.update_loaded_chunks(player.x(), player.y());
 
-    // Starting items
-    {
-        const Item* bread = find_item("Bread");
-        const Item* potion = find_item("Health Potion");
-        const Item* sword = find_item("Iron Sword");
-        const Item* armor = find_item("Leather Armor");
-        if (bread) player.add_item(*bread, 3);
-        if (potion) player.add_item(*potion, 1);
-        if (sword) player.add_item(*sword, 1);
-        if (armor) player.add_item(*armor, 1);
-    }
-
-    // World items — spawn near player in loaded chunks
-    {
-        const char* names[] = {"Gold Coin", "Health Potion", "Old Scroll", "Bread", "Rusty Key"};
-        const uint32_t glyphs[] = {'$', '!', '?', '%', '!'};
-        const uint8_t colors[][3] = {
-            {255, 215, 0}, {255, 50, 50}, {200, 180, 140}, {180, 140, 60}, {150, 150, 150}};
-        int num = 10 + std::rand() % 6;
-        for (int i = 0; i < num; ++i) {
-            int ix, iy;
-            int attempts = 0;
-            do {
-                ix = player.x() - 30 + std::rand() % 60;
-                iy = player.y() - 30 + std::rand() % 60;
-                attempts++;
-            } while (!world.is_passable(ix, iy) && attempts < 200);
-            if (attempts >= 200) continue;
-            int t = std::rand() % 5;
-            Entity e(ix, iy, glyphs[t], names[t], colors[t][0], colors[t][1], colors[t][2]);
-            e.set_is_item(true);
-            world.spawn_item(std::move(e));
-        }
-    }
-
-    // NPCs — spawn near player in loaded chunks
-    {
-        std::vector<std::pair<Item, int>> merchant_stock;
+        // Starting items
         {
-            auto add = [&](const char* name, int qty) {
-                const Item* it = find_item(name);
-                if (it) merchant_stock.emplace_back(*it, qty);
-            };
-            add("Bread", 10); add("Health Potion", 5); add("Water Skin", 5);
-            add("Iron Sword", 3); add("Iron Shield", 2); add("Leather Armor", 2);
-            add("Wooden Shield", 4); add("Hood", 3); add("Leather Boots", 3); add("Gold Ring", 1);
+            const Item* bread = find_item("Bread");
+            const Item* potion = find_item("Health Potion");
+            const Item* sword = find_item("Iron Sword");
+            const Item* armor = find_item("Leather Armor");
+            const Item* torch = find_item("Torch");
+            if (bread) player.add_item(*bread, 3);
+            if (potion) player.add_item(*potion, 1);
+            if (sword) player.add_item(*sword, 1);
+            if (armor) player.add_item(*armor, 1);
+            if (torch) player.add_item(*torch, 1);
         }
 
-        struct NpcDef {
-            uint32_t glyph; const char* name; uint8_t r, g, b;
-            bool merchant; int affinity;
-            std::vector<DialogueNode> (*dialogue_fn)();
-            std::vector<std::pair<Item, int>> shop;
-        };
-        NpcDef defs[] = {
-            {'a', "Old Sage", 180, 160, 220, false, 40, build_sage_dialogue, {}},
-            {'v', "Villager", 140, 200, 140, false, 30, build_villager_dialogue, {}},
-            {'m', "Merchant", 220, 180, 60, true, 60, build_merchant_dialogue, merchant_stock},
-            {'a', "Wanderer", 100, 160, 200, false, 20, build_wanderer_dialogue, {}},
-            {'v', "Child", 200, 200, 120, false, 50, build_child_dialogue, {}},
-        };
-        for (const auto& def : defs) {
-            int nx, ny;
-            int attempts = 0;
-            do {
-                nx = player.x() - 20 + std::rand() % 40;
-                ny = player.y() - 20 + std::rand() % 40;
-                attempts++;
-            } while (!world.is_passable(nx, ny) && attempts < 200);
-            if (attempts >= 200) continue;
-            world.spawn_npc(Npc(nx, ny, def.glyph, def.name, def.r, def.g, def.b,
-                                def.merchant, def.affinity, def.dialogue_fn(), def.shop));
-        }
-    }
-
-    // Enemies — spawn near player in loaded chunks
-    {
-        struct EnemyDef {
-            uint32_t glyph; const char* name; uint8_t r, g, b;
-            int hp, atk, def, xp, variance;
-            std::vector<std::pair<Item, int>> drops;
-        };
-        auto make_drops = [](const char* name, int qty) -> std::vector<std::pair<Item, int>> {
-            const Item* it = find_item(name);
-            if (it) return {{*it, qty}};
-            return {};
-        };
-
-        EnemyDef defs[] = {
-            {'r', "Rat", 160, 120, 80, 5, 2, 0, 3, 0, make_drops("Bread", 1)},
-            {'r', "Rat", 160, 120, 80, 5, 2, 0, 3, 0, {}},
-            {'g', "Goblin", 80, 180, 80, 12, 4, 1, 8, 1, make_drops("Gold Coin", 1)},
-            {'g', "Goblin", 80, 180, 80, 12, 4, 1, 8, 1, make_drops("Rusty Key", 1)},
-            {'s', "Spider", 120, 120, 120, 8, 3, 0, 5, 1, make_drops("Health Potion", 1)},
-            {'s', "Spider", 120, 120, 120, 8, 3, 0, 5, 1, {}},
-            {'b', "Bat", 100, 100, 160, 4, 1, 0, 2, 0, {}},
-            {'b', "Bat", 100, 100, 160, 4, 1, 0, 2, 0, {}},
-        };
-
-        for (const auto& def : defs) {
-            int ex, ey;
-            int attempts = 0;
-            do {
-                ex = player.x() - 25 + std::rand() % 50;
-                ey = player.y() - 25 + std::rand() % 50;
-                attempts++;
-            } while (!world.is_passable(ex, ey) && attempts < 200);
-            if (attempts >= 200) continue;
-            // Don't spawn too close to player
-            if (std::abs(ex - player.x()) + std::abs(ey - player.y()) < 15) continue;
-            world.spawn_enemy(Enemy(ex, ey, def.glyph, def.name, def.r, def.g, def.b,
-                                   def.hp, def.hp, def.atk, def.def, def.xp, def.variance, def.drops));
-        }
-    }
-
-    // Game state
-    bool running = true;
-    SDL_Event event;
-    bool need_fov_update = true;
-    bool player_took_turn = false;
-
-    GameMode mode = GameMode::Normal;
-    int inv_cursor = 0;
-    int inv_action_cursor = 0;
-    int gift_cursor = 0;
-    int dialogue_npc_x = -1, dialogue_npc_y = -1;
-    int dialogue_node = 0;
-    int dialogue_option = 0;
-    TradeState trade_state;
-    int equip_slot_cursor = 0;
-
-    static const EquipSlot equip_slots[] = {
-        EquipSlot::Head, EquipSlot::Shoulder_L, EquipSlot::Shoulder_R,
-        EquipSlot::Torso, EquipSlot::Arm_L, EquipSlot::Arm_R,
-        EquipSlot::Hand_L, EquipSlot::Hand_R, EquipSlot::Leg_L,
-        EquipSlot::Leg_R, EquipSlot::Foot_L, EquipSlot::Foot_R,
-    };
-    static const int NUM_EQUIP_SLOTS = 12;
-
-    int examine_item_type = 0;
-    Item examine_item;
-
-    std::string status_msg;
-    int status_timer = 0;
-    int turn_counter = 0;
-    int play_time_seconds = 0;
-    int play_time_timer = 0;
-
-    // Time and lighting
-    TimeSystem time_system;
-
-    // Pause menu state
-    int pause_cursor = 0;
-
-            {
-                uint8_t ambient = time_system.ambient_light();
-                int torch_r = player.has_light_source() ? player.torch_radius() : 0;
-                light::compute(world, player.x(), player.y(), ambient, torch_r);
-
-                int perception = player.stats().perception();
-                int base_radius = perception * 2;
-                if (base_radius < 6) base_radius = 6;
-                float light_frac = ambient / 15.0f;
-                int init_fov_radius = static_cast<int>(base_radius * light_frac);
-                int min_radius = (torch_r > 0) ? torch_r + 2 : 4;
-                if (init_fov_radius < min_radius) init_fov_radius = min_radius;
-                fov::compute(world, player.x(), player.y(), init_fov_radius);
+        // World items — spawn near player in loaded chunks
+        {
+            const char* names[] = {"Gold Coin", "Health Potion", "Old Scroll", "Bread", "Rusty Key", "Apple"};
+            const uint32_t glyphs[] = {'$', '!', '?', '%', '!', '%'};
+            const uint8_t colors[][3] = {
+                {255, 215, 0}, {255, 50, 50}, {200, 180, 140}, {180, 140, 60}, {150, 150, 150}, {220, 60, 60}};
+            int num = 10 + std::rand() % 6;
+            for (int i = 0; i < num; ++i) {
+                int ix, iy;
+                int attempts = 0;
+                do {
+                    ix = player.x() - 30 + std::rand() % 60;
+                    iy = player.y() - 30 + std::rand() % 60;
+                    attempts++;
+                } while (!world.is_passable(ix, iy) && attempts < 200);
+                if (attempts >= 200) continue;
+                int t = std::rand() % 6;
+                Entity e(ix, iy, glyphs[t], names[t], colors[t][0], colors[t][1], colors[t][2]);
+                e.set_is_item(true);
+                world.spawn_item(std::move(e));
             }
+        }
+
+        // NPCs — spawn near player in loaded chunks
+        {
+            std::vector<std::pair<Item, int>> merchant_stock;
+            {
+                auto add = [&](const char* name, int qty) {
+                    const Item* it = find_item(name);
+                    if (it) merchant_stock.emplace_back(*it, qty);
+                };
+                add("Bread", 10); add("Health Potion", 5); add("Water Skin", 5);
+                add("Iron Sword", 3); add("Iron Shield", 2); add("Leather Armor", 2);
+                add("Wooden Shield", 4); add("Hood", 3); add("Leather Boots", 3); add("Gold Ring", 1);
+            }
+
+            struct NpcDef {
+                uint32_t glyph; const char* name; uint8_t r, g, b;
+                bool merchant; int affinity;
+                std::vector<DialogueNode> (*dialogue_fn)();
+                std::vector<std::pair<Item, int>> shop;
+            };
+            NpcDef defs[] = {
+                {'a', "Old Sage", 180, 160, 220, false, 40, build_sage_dialogue, {}},
+                {'v', "Villager", 140, 200, 140, false, 30, build_villager_dialogue, {}},
+                {'m', "Merchant", 220, 180, 60, true, 60, build_merchant_dialogue, merchant_stock},
+                {'a', "Wanderer", 100, 160, 200, false, 20, build_wanderer_dialogue, {}},
+                {'v', "Child", 200, 200, 120, false, 50, build_child_dialogue, {}},
+            };
+            for (const auto& def : defs) {
+                int nx, ny;
+                int attempts = 0;
+                do {
+                    nx = player.x() - 20 + std::rand() % 40;
+                    ny = player.y() - 20 + std::rand() % 40;
+                    attempts++;
+                } while (!world.is_passable(nx, ny) && attempts < 200);
+                if (attempts >= 200) continue;
+                world.spawn_npc(Npc(nx, ny, def.glyph, def.name, def.r, def.g, def.b,
+                                    def.merchant, def.affinity, def.dialogue_fn(), def.shop));
+            }
+        }
+
+        // Enemies — spawn near player in loaded chunks
+        {
+            const char* names[] = {"Rat", "Rat", "Goblin", "Goblin", "Spider", "Bat"};
+            for (const char* name : names) {
+                int ex, ey;
+                int attempts = 0;
+                do {
+                    ex = player.x() - 25 + std::rand() % 50;
+                    ey = player.y() - 25 + std::rand() % 50;
+                    attempts++;
+                } while (!world.is_passable(ex, ey) && attempts < 200);
+                if (attempts >= 200) continue;
+                // Don't spawn too close to player
+                if (std::abs(ex - player.x()) + std::abs(ey - player.y()) < 15) continue;
+                world.spawn_enemy(make_enemy(name, ex, ey));
+            }
+        }
+
+        // Reset UI/run state
+        turn_counter = 0;
+        play_time_seconds = 0;
+        play_time_timer = 0;
+        msg_log.clear();
+        discovered_structures.clear();
+        zone_anchored = false;
+        zone_pick_type = false;
+        need_fov_update = true;
+        game_started = true;
+        mode = GameMode::Normal;
+        log_msg("You arrive at the village. The wilds await.", 150);
+    };
+
+    // Demo mode: skip the menu and jump straight into a new game
+    int demo_frame = 0;
+    if (demo_mode) {
+        start_new_game();
+    }
+    auto demo_push_key = [](SDL_Keycode k) {
+        SDL_Event e;
+        SDL_zero(e);
+        e.type = SDL_KEYDOWN;
+        e.key.keysym.sym = k;
+        e.key.keysym.mod = KMOD_NONE;
+        SDL_PushEvent(&e);
+    };
+
+    // ── Structure discovery check (after movement) ─────────────────
+    auto check_discovery = [&]() {
+        int cx = World::world_to_chunk_x(player.x());
+        int cy = World::world_to_chunk_y(player.y());
+        Chunk* chunk = world.get_chunk(cx, cy);
+        if (!chunk) return;
+        int sid = chunk->structure_id();
+        if (sid == 0) return;
+        if (discovered_structures.count({cx, cy})) return;
+        discovered_structures.insert({cx, cy});
+        const StructureDef& sd = structure_def(static_cast<StructureType>(sid));
+        log_msg(std::string("You discover a ") + sd.name + "!", 150);
+    };
 
     while (running) {
         player_took_turn = false;
+
+        // Demo mode scripted timeline
+        std::string demo_shot;
+        if (demo_mode) {
+            switch (demo_frame) {
+                case 10:  demo_push_key(SDLK_d); break;
+                case 12:  demo_push_key(SDLK_s); break;
+                case 20:  demo_shot = "demo1_game.bmp"; break;
+                case 30:  demo_push_key(SDLK_i); break;
+                case 40:  demo_shot = "demo2_inv.bmp"; break;
+                case 50:  demo_push_key(SDLK_ESCAPE); break;
+                case 60:  demo_push_key(SDLK_c); break;
+                case 70:  demo_shot = "demo3_craft.bmp"; break;
+                case 80:  demo_push_key(SDLK_ESCAPE); break;
+                case 90:  demo_push_key(SDLK_b); break;
+                case 100: demo_push_key(SDLK_d); break;
+                case 110: demo_shot = "demo4_build.bmp"; break;
+                case 120: demo_push_key(SDLK_ESCAPE); break;
+                case 130: demo_push_key(SDLK_z); break;
+                case 140: demo_shot = "demo5_zone.bmp"; break;
+                case 150: demo_push_key(SDLK_ESCAPE); break;
+                case 160: demo_push_key(SDLK_x); break;
+                case 170: demo_shot = "demo6_char.bmp"; break;
+                case 180: demo_push_key(SDLK_ESCAPE); break;
+                case 190: demo_push_key(SDLK_ESCAPE); break;
+                case 200: demo_shot = "demo7_pause.bmp"; break;
+                case 210: running = false; break;
+                default: break;
+            }
+            demo_frame++;
+        }
 
         while (SDL_PollEvent(&event)) {
             if (event.type == SDL_QUIT) { running = false; break; }
             if (event.type != SDL_KEYDOWN) continue;
             SDL_Keycode key = event.key.keysym.sym;
 
-            // --- Dead mode ---
-            if (mode == GameMode::Dead) {
-                if (key == SDLK_r) {
-                    // Restart
-                    mode = GameMode::Normal;
-                    map_seed = static_cast<uint32_t>(std::time(nullptr));
-                    world.init(map_seed);
-                    time_system = TimeSystem();
-                    player = Player();
-                    world.update_loaded_chunks(0, 0);
-                    // Find spawn point
-                    {
-                        bool found = false;
-                        for (int r = 0; r < 100 && !found; ++r) {
-                            for (int dy = -r; dy <= r && !found; ++dy) {
-                                for (int dx = -r; dx <= r && !found; ++dx) {
-                                    if (std::abs(dx) != r && std::abs(dy) != r) continue;
-                                    if (world.is_passable(dx, dy)) {
-                                        player.spawn(dx, dy);
-                                        found = true;
-                                    }
-                                }
-                            }
-                        }
-        if (!found) {
-            for (int r = 0; r < 200 && !found; ++r) {
-                for (int dy = -r; dy <= r && !found; ++dy) {
-                    for (int dx = -r; dx <= r && !found; ++dx) {
-                        if (std::abs(dx) != r && std::abs(dy) != r) continue;
-                        if (world.is_passable(dx, dy)) {
-                            player.spawn(dx, dy);
-                            found = true;
-                        }
-                    }
-                }
-            }
-        }
-        if (!found) player.spawn(0, 0);
-                    }
-                    world.update_loaded_chunks(player.x(), player.y());
-                    player.add_item(*find_item("Bread"), 3);
-                    player.add_item(*find_item("Health Potion"), 1);
-                    player.add_item(*find_item("Iron Sword"), 1);
-                    player.add_item(*find_item("Leather Armor"), 1);
-                    world.clear_all_entities();
-                    turn_counter = 0;
-                    need_fov_update = true;
-
-                    // Respawn enemies near player
-                    {
-                        struct EDef { uint32_t glyph; const char* n; uint8_t r,g,b; int hp,atk,def,xp; };
-                        EDef ed[] = {
-                            {'r',"Rat",160,120,80,5,2,0,3},
-                            {'r',"Rat",160,120,80,5,2,0,3},
-                            {'g',"Goblin",80,180,80,12,4,1,8},
-                            {'g',"Goblin",80,180,80,12,4,1,8},
-                            {'s',"Spider",120,120,120,8,3,0,5},
-                            {'b',"Bat",100,100,160,4,1,0,2},
-                        };
-                        for (const auto& d : ed) {
-                            int ex,ey;
-                            int attempts = 0;
-                            do {
-                                ex = player.x() - 25 + std::rand() % 50;
-                                ey = player.y() - 25 + std::rand() % 50;
-                                attempts++;
-                            } while (!world.is_passable(ex,ey) && attempts < 200);
-                            if (attempts >= 200) continue;
-                            if (std::abs(ex-player.x())+std::abs(ey-player.y())<15) continue;
-                            world.spawn_enemy(Enemy(ex,ey,d.glyph,d.n,d.r,d.g,d.b,d.hp,d.hp,d.atk,d.def,d.xp));
-                        }
+            // --- Main menu ---
+            if (mode == GameMode::MainMenu) {
+                if (key == SDLK_UP && menu_cursor > 0) menu_cursor--;
+                if (key == SDLK_DOWN && menu_cursor < 2) menu_cursor++;
+                if (key == SDLK_RETURN || key == SDLK_SPACE) {
+                    if (menu_cursor == 0) {
+                        start_new_game();
+                    } else if (menu_cursor == 1) {
+                        load_from_menu = true;
+                        pause_cursor = 0;
+                        mode = GameMode::LoadGame;
+                    } else {
+                        running = false;
                     }
                 }
                 if (key == SDLK_ESCAPE) running = false;
+                continue;
+            }
+
+            // --- Dead mode ---
+            if (mode == GameMode::Dead) {
+                if (key == SDLK_r) start_new_game();
+                if (key == SDLK_ESCAPE) { game_started = false; mode = GameMode::MainMenu; menu_cursor = 0; }
                 continue;
             }
 
@@ -401,30 +444,56 @@ int main(int argc, char* argv[]) {
             if (mode == GameMode::PauseMenu) {
                 if (key == SDLK_ESCAPE) { mode = GameMode::Normal; continue; }
                 if (key == SDLK_UP && pause_cursor > 0) pause_cursor--;
-                if (key == SDLK_DOWN && pause_cursor < 2) pause_cursor++;
+                if (key == SDLK_DOWN && pause_cursor < 4) pause_cursor++;
                 if (key == SDLK_RETURN || key == SDLK_SPACE) {
-                    if (pause_cursor == 0) { mode = GameMode::SaveGame; }
-                    else if (pause_cursor == 1) { mode = GameMode::LoadGame; }
+                    if (pause_cursor == 0) { pause_cursor = 0; mode = GameMode::SaveGame; }
+                    else if (pause_cursor == 1) { load_from_menu = false; pause_cursor = 0; mode = GameMode::LoadGame; }
+                    else if (pause_cursor == 2) { settings_cursor = 0; mode = GameMode::Settings; }
+                    else if (pause_cursor == 3) { game_started = false; mode = GameMode::MainMenu; menu_cursor = 0; }
                     else { running = false; }
+                }
+                continue;
+            }
+
+            // --- Settings screen ---
+            if (mode == GameMode::Settings) {
+                if (key == SDLK_ESCAPE || key == SDLK_RETURN) {
+                    save_settings(settings);
+                    mode = GameMode::PauseMenu;
+                    continue;
+                }
+                if (key == SDLK_UP && settings_cursor > 0) settings_cursor--;
+                if (key == SDLK_DOWN && settings_cursor < 2) settings_cursor++;
+                int delta = 0;
+                if (key == SDLK_LEFT) delta = -1;
+                if (key == SDLK_RIGHT) delta = 1;
+                if (delta != 0) {
+                    if (settings_cursor == 0) world.set_load_radius(settings.load_radius + delta);
+                    if (settings_cursor == 1) world.set_render_radius(settings.render_radius + delta);
+                    if (settings_cursor == 2) world.set_simulation_radius(settings.sim_radius + delta);
+                    // World setters enforce constraints; sync back
+                    settings.load_radius = world.load_radius();
+                    settings.render_radius = world.render_radius();
+                    settings.sim_radius = world.simulation_radius();
+                    // Reload chunks under new radius
+                    world.update_loaded_chunks(player.x(), player.y());
+                    need_fov_update = true;
                 }
                 continue;
             }
 
             // --- Save game screen ---
             if (mode == GameMode::SaveGame) {
-                if (key == SDLK_ESCAPE) { mode = GameMode::PauseMenu; continue; }
-                auto saves = list_saves();
+                if (key == SDLK_ESCAPE) { pause_cursor = 0; mode = GameMode::PauseMenu; continue; }
                 int max_slot = MAX_SAVE_SLOTS - 1;
                 if (key == SDLK_UP && pause_cursor > 0) pause_cursor--;
                 if (key == SDLK_DOWN && pause_cursor < max_slot) pause_cursor++;
                 if (key == SDLK_RETURN || key == SDLK_SPACE) {
                     GameState state = capture_state(player, world, map_seed, play_time_seconds, time_system);
                     if (save_game(pause_cursor, state)) {
-                        status_msg = "Game saved to slot " + std::to_string(pause_cursor + 1);
-                        status_timer = 90;
+                        log_msg("Game saved to slot " + std::to_string(pause_cursor + 1));
                     } else {
-                        status_msg = "Save failed!";
-                        status_timer = 90;
+                        log_msg("Save failed!");
                     }
                     mode = GameMode::Normal;
                 }
@@ -433,8 +502,11 @@ int main(int argc, char* argv[]) {
 
             // --- Load game screen ---
             if (mode == GameMode::LoadGame) {
-                if (key == SDLK_ESCAPE) { mode = GameMode::PauseMenu; continue; }
-                auto saves = list_saves();
+                if (key == SDLK_ESCAPE) {
+                    if (!load_from_menu) pause_cursor = 0;
+                    mode = load_from_menu ? GameMode::MainMenu : GameMode::PauseMenu;
+                    continue;
+                }
                 int max_slot = MAX_SAVE_SLOTS - 1;
                 if (key == SDLK_UP && pause_cursor > 0) pause_cursor--;
                 if (key == SDLK_DOWN && pause_cursor < max_slot) pause_cursor++;
@@ -443,7 +515,11 @@ int main(int argc, char* argv[]) {
                     if (load_game(pause_cursor, state)) {
                         // Restore world with saved seed
                         map_seed = state.map_seed;
+                        world = World();
                         world.init(map_seed);
+                        world.set_load_radius(settings.load_radius);
+                        world.set_render_radius(settings.render_radius);
+                        world.set_simulation_radius(settings.sim_radius);
 
                         // Restore player
                         player = Player();
@@ -468,27 +544,36 @@ int main(int argc, char* argv[]) {
                             player.equip_to_slot(slot, item);
                         }
 
-                        // Load chunks around player
+                        // Load chunks around player (regenerates terrain + structures from seed)
                         world.update_loaded_chunks(player.x(), player.y());
 
-                        // Clear existing entities before restoring per-chunk
+                        // Clear auto-spawned entities before restoring saved ones
                         world.clear_all_entities();
 
                         // Restore chunk data (terrain, explored tiles, modifications, placed objects, entities)
                         apply_chunk_data(world, state.chunks);
 
+                        // Restore zones
+                        world.clear_zones();
+                        for (const auto& z : state.zones) world.add_zone(z);
+
                         // Reset UI state
                         turn_counter = 0;
                         play_time_seconds = state.meta.play_time_seconds;
                         time_system.set_turn_of_day(state.turn_of_day);
+                        time_system.set_day(state.day);
+                        msg_log.clear();
+                        discovered_structures.clear();
+                        zone_anchored = false;
+                        zone_pick_type = false;
                         need_fov_update = true;
-                        status_msg = "Game loaded from slot " + std::to_string(pause_cursor + 1);
-                        status_timer = 90;
+                        game_started = true;
+                        log_msg("Game loaded from slot " + std::to_string(pause_cursor + 1));
+                        mode = GameMode::Normal;
                     } else {
-                        status_msg = "No save in slot " + std::to_string(pause_cursor + 1);
-                        status_timer = 90;
+                        log_msg("No save in slot " + std::to_string(pause_cursor + 1));
+                        mode = load_from_menu ? GameMode::MainMenu : GameMode::Normal;
                     }
-                    mode = GameMode::Normal;
                 }
                 continue;
             }
@@ -526,10 +611,10 @@ int main(int argc, char* argv[]) {
                         case DialogueAction::Gift:
                             if (npc.can_gift() || npc.is_merchant()) {
                                 gift_cursor = 0;
+                                gift_return = GameMode::Dialogue;
                                 mode = GameMode::GiftSelect;
                             } else {
-                                status_msg = npc.name() + " doesn't want your gifts yet.";
-                                status_timer = 90;
+                                log_msg(npc.name() + " doesn't want your gifts yet.");
                             }
                             break;
                         default: break;
@@ -540,7 +625,7 @@ int main(int argc, char* argv[]) {
 
             // --- Gift select ---
             if (mode == GameMode::GiftSelect) {
-                if (key == SDLK_ESCAPE) { mode = GameMode::Inventory; continue; }
+                if (key == SDLK_ESCAPE) { mode = gift_return; continue; }
                 int max_idx = static_cast<int>(player.inventory().size()) - 1;
                 if (key == SDLK_UP && gift_cursor > 0) gift_cursor--;
                 if (key == SDLK_DOWN && gift_cursor < max_idx) gift_cursor++;
@@ -559,8 +644,7 @@ int main(int argc, char* argv[]) {
                         }
                     }
                     if (!target_npc) {
-                        status_msg = "No one nearby to gift to.";
-                        status_timer = 90;
+                        log_msg("No one nearby to gift to.");
                         mode = GameMode::Normal;
                     } else {
                         const Item& item = player.inventory_item(gift_cursor);
@@ -575,11 +659,135 @@ int main(int argc, char* argv[]) {
                         }
                         target_npc->adjust_affinity(aff_change);
                         player.remove_item(gift_cursor, 1);
-                        status_msg = target_npc->name() + ": \"" + target_npc->gift_reaction_text(reaction) + "\"";
-                        status_timer = 150;
+                        log_msg(target_npc->name() + ": \"" + target_npc->gift_reaction_text(reaction) + "\"", 150);
                         mode = GameMode::Normal;
                         player_took_turn = true;
                     }
+                }
+                continue;
+            }
+
+            // --- Craft mode ---
+            if (mode == GameMode::Craft) {
+                if (key == SDLK_ESCAPE || key == SDLK_c) { mode = GameMode::Normal; continue; }
+                const auto& recipes = recipe_db();
+                int max_idx = static_cast<int>(recipes.size()) - 1;
+                if (key == SDLK_UP && craft_cursor > 0) craft_cursor--;
+                if (key == SDLK_DOWN && craft_cursor < max_idx) craft_cursor++;
+                if (key == SDLK_RETURN || key == SDLK_SPACE) {
+                    const Recipe& r = recipes[craft_cursor];
+                    if (craft_can_make(r, player)) {
+                        log_msg(craft_make(r, player));
+                        player_took_turn = true;
+                    } else {
+                        log_msg("Missing materials.");
+                    }
+                }
+                continue;
+            }
+
+            // --- Build mode ---
+            if (mode == GameMode::Build) {
+                if (key == SDLK_ESCAPE || key == SDLK_b) { mode = GameMode::Normal; continue; }
+                int dx = 0, dy = 0;
+                switch (key) {
+                    case SDLK_w: case SDLK_UP:    dy = -1; break;
+                    case SDLK_s: case SDLK_DOWN:  dy =  1; break;
+                    case SDLK_a: case SDLK_LEFT:  dx = -1; break;
+                    case SDLK_d: case SDLK_RIGHT: dx =  1; break;
+                    default: break;
+                }
+                if (dx != 0 || dy != 0) {
+                    int nx = build_cx + dx;
+                    int ny = build_cy + dy;
+                    if (std::abs(nx - player.x()) <= BUILD_RANGE && std::abs(ny - player.y()) <= BUILD_RANGE) {
+                        build_cx = nx;
+                        build_cy = ny;
+                    }
+                }
+                if (key == SDLK_TAB || key == SDLK_RIGHTBRACKET) {
+                    build_sel = (build_sel + 1) % static_cast<int>(BuildTile::Count);
+                }
+                if (key == SDLK_LEFTBRACKET) {
+                    build_sel = (build_sel + static_cast<int>(BuildTile::Count) - 1) % static_cast<int>(BuildTile::Count);
+                }
+                if (key == SDLK_RETURN || key == SDLK_SPACE) {
+                    BuildTile bt = static_cast<BuildTile>(build_sel);
+                    // Don't wall yourself in
+                    const BuildDef& def = build_def(bt);
+                    if (!def.is_light_object && tile_blocks_movement(def.tile) &&
+                        build_cx == player.x() && build_cy == player.y()) {
+                        log_msg("Can't build a wall under yourself.");
+                    } else {
+                        std::string result = build_place(world, player, bt, build_cx, build_cy);
+                        log_msg(result);
+                        if (result.rfind("Built", 0) == 0) {
+                            player_took_turn = true;
+                            need_fov_update = true;
+                        }
+                    }
+                }
+                continue;
+            }
+
+            // --- Zone mode ---
+            if (mode == GameMode::Zone) {
+                if (key == SDLK_ESCAPE || key == SDLK_z) {
+                    if (zone_pick_type) { zone_pick_type = false; zone_anchored = false; }
+                    else if (zone_anchored) { zone_anchored = false; }
+                    else { mode = GameMode::Normal; }
+                    continue;
+                }
+                if (zone_pick_type) {
+                    int nt = static_cast<int>(ZoneType::Count);
+                    if (key == SDLK_TAB || key == SDLK_DOWN || key == SDLK_RIGHT) zone_type_sel = (zone_type_sel + 1) % nt;
+                    if (key == SDLK_UP || key == SDLK_LEFT) zone_type_sel = (zone_type_sel + nt - 1) % nt;
+                    if (key == SDLK_RETURN || key == SDLK_SPACE) {
+                        Zone z;
+                        z.x0 = std::min(zone_ax, zone_cx);
+                        z.y0 = std::min(zone_ay, zone_cy);
+                        z.x1 = std::max(zone_ax, zone_cx);
+                        z.y1 = std::max(zone_ay, zone_cy);
+                        z.type = static_cast<ZoneType>(zone_type_sel);
+                        world.add_zone(z);
+                        log_msg(std::string("Designated ") + zone_type_name(z.type) + " zone.");
+                        zone_anchored = false;
+                        zone_pick_type = false;
+                    }
+                    continue;
+                }
+                int dx = 0, dy = 0;
+                switch (key) {
+                    case SDLK_w: case SDLK_UP:    dy = -1; break;
+                    case SDLK_s: case SDLK_DOWN:  dy =  1; break;
+                    case SDLK_a: case SDLK_LEFT:  dx = -1; break;
+                    case SDLK_d: case SDLK_RIGHT: dx =  1; break;
+                    default: break;
+                }
+                if (dx != 0 || dy != 0) { zone_cx += dx; zone_cy += dy; }
+                if (key == SDLK_x) {
+                    if (world.remove_zone_at(zone_cx, zone_cy)) {
+                        log_msg("Zone removed.");
+                        if (zone_anchored) { zone_anchored = false; }
+                    }
+                }
+                if (key == SDLK_RETURN || key == SDLK_SPACE) {
+                    if (!zone_anchored) {
+                        zone_ax = zone_cx;
+                        zone_ay = zone_cy;
+                        zone_anchored = true;
+                    } else {
+                        zone_pick_type = true;
+                        zone_type_sel = 0;
+                    }
+                }
+                continue;
+            }
+
+            // --- Character sheet ---
+            if (mode == GameMode::Character) {
+                if (key == SDLK_ESCAPE || key == SDLK_x || key == SDLK_RETURN || key == SDLK_SPACE) {
+                    mode = GameMode::Normal;
                 }
                 continue;
             }
@@ -619,13 +827,12 @@ int main(int argc, char* argv[]) {
                             // Use
                             if (item.use_effect() == UseEffect::Heal) {
                                 player.heal(item.use_amount());
-                                status_msg = "Used " + item.name() + ". Healed " + std::to_string(item.use_amount()) + " HP.";
+                                log_msg("Used " + item.name() + ". Healed " + std::to_string(item.use_amount()) + " HP.");
                             } else if (item.use_effect() == UseEffect::Feed) {
-                                status_msg = "Ate " + item.name() + ". Restored hunger.";
+                                log_msg("Ate " + item.name() + ".");
                             } else if (item.use_effect() == UseEffect::Drink) {
-                                status_msg = "Drank " + item.name() + ". Restored thirst.";
+                                log_msg("Drank " + item.name() + ".");
                             }
-                            status_timer = 90;
                             player.remove_item(inv_cursor, 1);
                             mode = GameMode::Inventory;
                             if (inv_cursor >= static_cast<int>(player.inventory().size()))
@@ -635,8 +842,7 @@ int main(int argc, char* argv[]) {
                             EquipSlot slot = item.equip_slot();
                             if (player.is_slot_occupied(slot)) player.unequip(slot);
                             player.equip(inv_cursor);
-                            status_msg = "Equipped " + item.name() + ".";
-                            status_timer = 60;
+                            log_msg("Equipped " + item.name() + ".", 60);
                             mode = GameMode::Inventory;
                             if (inv_cursor >= static_cast<int>(player.inventory().size()))
                                 inv_cursor = std::max(0, static_cast<int>(player.inventory().size()) - 1);
@@ -647,8 +853,7 @@ int main(int argc, char* argv[]) {
                             e.set_is_item(true);
                             world.spawn_item(std::move(e));
                             player.remove_item(inv_cursor, 1);
-                            status_msg = "Dropped " + item.name() + ".";
-                            status_timer = 60;
+                            log_msg("Dropped " + item.name() + ".", 60);
                             mode = GameMode::Inventory;
                             if (inv_cursor >= static_cast<int>(player.inventory().size()))
                                 inv_cursor = std::max(0, static_cast<int>(player.inventory().size()) - 1);
@@ -659,6 +864,7 @@ int main(int argc, char* argv[]) {
                         } else if (action == 4) {
                             // Gift
                             gift_cursor = 0;
+                            gift_return = GameMode::Inventory;
                             mode = GameMode::GiftSelect;
                         }
                     }
@@ -689,8 +895,7 @@ int main(int argc, char* argv[]) {
                         EquipSlot slot = equip_slots[equip_slot_cursor];
                         if (player.is_slot_occupied(slot)) {
                             player.unequip(slot);
-                            status_msg = "Unequipped.";
-                            status_timer = 60;
+                            log_msg("Unequipped.", 60);
                         }
                     }
                 }
@@ -708,6 +913,29 @@ int main(int argc, char* argv[]) {
                     mode = GameMode::Inventory;
                     inv_cursor = 0;
                     inv_action_cursor = 0;
+                    continue;
+                }
+                if (key == SDLK_c) {
+                    mode = GameMode::Craft;
+                    craft_cursor = 0;
+                    continue;
+                }
+                if (key == SDLK_b) {
+                    mode = GameMode::Build;
+                    build_cx = player.x();
+                    build_cy = player.y();
+                    continue;
+                }
+                if (key == SDLK_z) {
+                    mode = GameMode::Zone;
+                    zone_cx = player.x();
+                    zone_cy = player.y();
+                    zone_anchored = false;
+                    zone_pick_type = false;
+                    continue;
+                }
+                if (key == SDLK_x) {
+                    mode = GameMode::Character;
                     continue;
                 }
 
@@ -736,8 +964,7 @@ int main(int argc, char* argv[]) {
                                 continue;
                             }
                             if (!player.can_carry(db_item->weight())) {
-                                status_msg = "Too heavy to pick up " + std::string(e->name()) + "!";
-                                status_timer = 90;
+                                log_msg("Too heavy to pick up " + std::string(e->name()) + "!");
                                 break;
                             }
                             if (e->name() == "Gold Coin") {
@@ -751,11 +978,10 @@ int main(int argc, char* argv[]) {
                         }
                         if (!picked.empty()) {
                             if (picked.size() == 1) {
-                                status_msg = "Picked up " + picked[0];
+                                log_msg("Picked up " + picked[0], 60);
                             } else {
-                                status_msg = "Picked up " + std::to_string(picked.size()) + " items";
+                                log_msg("Picked up " + std::to_string(picked.size()) + " items", 60);
                             }
-                            status_timer = 60;
                         }
                         break;
                     }
@@ -777,48 +1003,128 @@ int main(int argc, char* argv[]) {
                     default: break;
                 }
 
-                // Movement / combat
-                if ((dx != 0 || dy != 0) && player.can_move(dx, dy, world)) {
+                // Movement / combat / gathering
+                if (dx != 0 || dy != 0) {
                     int nx = player.x() + dx;
                     int ny = player.y() + dy;
 
-                    // Check for enemy at destination (combat)
-                    bool fought = false;
-                    Enemy* target = world.enemy_at(nx, ny);
-                    if (target) {
-                        // Player attacks enemy
-                        int atk_var = player.total_damage_variance();
-                        int raw_atk = player.total_attack() + (atk_var > 0 ? std::rand() % (2 * atk_var + 1) - atk_var : 0);
-                        int dmg = raw_atk - target->defense();
-                        if (dmg < 1) dmg = 1;
-                        target->take_damage(dmg);
-                        status_msg = "You hit " + target->name() + " for " + std::to_string(dmg) + " damage!";
-                        status_timer = 60;
-                        fought = true;
+                    if (player.can_move(dx, dy, world)) {
+                        // Check for enemy at destination (combat)
+                        bool fought = false;
+                        Enemy* target = world.enemy_at(nx, ny);
+                        if (target) {
+                            // Player attacks enemy
+                            int atk_var = player.total_damage_variance();
+                            int raw_atk = player.total_attack() + (atk_var > 0 ? std::rand() % (2 * atk_var + 1) - atk_var : 0);
+                            int dmg = raw_atk - target->defense();
+                            if (dmg < 1) dmg = 1;
+                            target->take_damage(dmg);
+                            std::string combat_msg = "You hit " + target->name() + " for " + std::to_string(dmg) + " damage!";
+                            fought = true;
 
-                        if (target->check_death()) {
-                            status_msg += " " + target->name() + " killed! +" + std::to_string(target->xp_value()) + " XP";
-                            player.add_xp(target->xp_value());
-                            // Drop items on the ground
-                            int drop_x = target->x(), drop_y = target->y();
-                            for (const auto& [item, qty] : target->drops()) {
-                                Entity e(drop_x, drop_y, item.glyph(), item.name(),
-                                         item.fg_r(), item.fg_g(), item.fg_b());
-                                e.set_is_item(true);
-                                world.spawn_item(std::move(e));
+                            if (target->check_death()) {
+                                combat_msg += " " + target->name() + " killed! +" + std::to_string(target->xp_value()) + " XP";
+                                player.add_xp(target->xp_value());
+                                // Drop items on the ground
+                                int drop_x = target->x(), drop_y = target->y();
+                                for (const auto& [item, qty] : target->drops()) {
+                                    Entity e(drop_x, drop_y, item.glyph(), item.name(),
+                                             item.fg_r(), item.fg_g(), item.fg_b());
+                                    e.set_is_item(true);
+                                    world.spawn_item(std::move(e));
+                                }
+                                world.remove_enemy_at(nx, ny);
                             }
-                            world.remove_enemy_at(nx, ny);
+                            log_msg(combat_msg, 60);
+                        }
+
+                        if (!fought) {
+                            player.move(dx, dy, world);
+                            world.update_loaded_chunks(player.x(), player.y());
+                            need_fov_update = true;
+                            check_discovery();
+                        }
+                        player_took_turn = true;
+                    } else {
+                        // Blocked — try resource gathering
+                        Tile dest = world.get_tile(nx, ny);
+                        if (dest.type == TileType::Tree) {
+                            int yield = has_equipped("Woodcutter's Axe") ? 2 : 1;
+                            const Item* wood = find_item("Wood");
+                            if (wood) player.add_item(*wood, yield);
+                            world.place_tile(nx, ny, TileType::Grass);
+                            log_msg("You chop down the tree. +" + std::to_string(yield) + " Wood");
+                            player_took_turn = true;
+                            need_fov_update = true;
+                        } else if (dest.type == TileType::Mountain) {
+                            bool pick = has_equipped("Pickaxe");
+                            int yield = pick ? 2 : 1;
+                            int ore_chance = pick ? 30 : 15;
+                            const Item* stone = find_item("Stone");
+                            if (stone) player.add_item(*stone, yield);
+                            std::string m = "You mine the rock face. +" + std::to_string(yield) + " Stone";
+                            if (std::rand() % 100 < ore_chance) {
+                                const Item* ore = find_item("Iron Ore");
+                                if (ore) { player.add_item(*ore, 1); m += ", +1 Iron Ore"; }
+                            }
+                            world.place_tile(nx, ny, TileType::Stone);
+                            log_msg(m);
+                            player_took_turn = true;
+                            need_fov_update = true;
                         }
                     }
-
-                    if (!fought) {
-                        player.move(dx, dy, world);
-                        world.update_loaded_chunks(player.x(), player.y());
-                        need_fov_update = true;
-                    }
-                    player_took_turn = true;
                 }
             }
+        }
+
+        if (!game_started) {
+            // ── Main menu render ───────────────────────────────────
+            renderer.clear();
+            int view_cols = window.width() / renderer.cell_width();
+            int view_rows = window.height() / renderer.cell_height();
+            renderer.begin_frame(view_cols, view_rows);
+
+            // Decorative border
+            for (int x = 0; x < view_cols; ++x) {
+                Cell c; c.glyph = '='; c.fg_r = 60; c.fg_g = 60; c.fg_b = 80;
+                renderer.set_cell(x, 1, c);
+                renderer.set_cell(x, view_rows - 2, c);
+            }
+
+            std::string title = "A S C I I   G A M E";
+            draw_string(renderer, (view_cols - title.size()) / 2, view_rows / 2 - 8,
+                        title, 220, 200, 120);
+
+            std::string sub = "A fantasy life in letters";
+            draw_string(renderer, (view_cols - sub.size()) / 2, view_rows / 2 - 6,
+                        sub, 120, 120, 140);
+
+            std::string opts[] = {"New Game", "Load Game", "Quit"};
+            for (int i = 0; i < 3; ++i) {
+                bool sel = (i == menu_cursor);
+                std::string s = (sel ? "> " : "  ") + opts[i];
+                draw_string(renderer, (view_cols - 12) / 2, view_rows / 2 - 2 + i * 2,
+                            s, sel ? 255 : 160, sel ? 255 : 160, sel ? 100 : 160);
+            }
+
+            // Message flash (e.g. failed load)
+            if (!msg_log.empty()) {
+                const Msg& m = msg_log.back();
+                draw_string(renderer, (view_cols - m.text.size()) / 2, view_rows / 2 + 6,
+                            m.text, 255, 200, 100);
+            }
+
+            std::string hint1 = "WASD move  |  I inventory  |  C craft  |  B build";
+            std::string hint2 = "Z zones  |  X stats  |  G grab  |  . wait  |  ESC pause";
+            draw_string(renderer, (view_cols - hint1.size()) / 2, view_rows - 5,
+                        hint1, 80, 80, 100);
+            draw_string(renderer, (view_cols - hint2.size()) / 2, view_rows - 4,
+                        hint2, 80, 80, 100);
+
+            renderer.render_grid();
+            renderer.present();
+            SDL_Delay(16);
+            continue;
         }
 
         if (need_fov_update) {
@@ -848,7 +1154,6 @@ int main(int argc, char* argv[]) {
             auto all_enemies = world.get_all_enemies();
             for (auto* ep : all_enemies) {
                 if (!ep->is_alive()) continue;
-                int dist_before = std::abs(ep->x() - player.x()) + std::abs(ep->y() - player.y());
                 ep->update(world, player.x(), player.y());
 
                 // Enemy attacks if adjacent and chasing
@@ -856,9 +1161,11 @@ int main(int argc, char* argv[]) {
                 if (dist_after <= 1 && ep->is_alive()) {
                     int e_var = ep->damage_variance();
                     int raw_e_atk = ep->attack() + (e_var > 0 ? std::rand() % (2 * e_var + 1) - e_var : 0);
+                    // Night predators hit harder after dark
+                    if (ep->night_predator() && time_system.is_night()) raw_e_atk += 2;
                     int actual = player.calc_damage(raw_e_atk);
                     player.take_damage(raw_e_atk);
-                    status_msg = ep->name() + " hits you for " + std::to_string(actual) + " damage!";
+                    std::string combat_msg = ep->name() + " hits you for " + std::to_string(actual) + " damage!";
 
                     // Player counter-attacks
                     int c_var = player.total_damage_variance();
@@ -866,10 +1173,10 @@ int main(int argc, char* argv[]) {
                     int counter_dmg = raw_c_atk - ep->defense();
                     if (counter_dmg < 1) counter_dmg = 1;
                     ep->take_damage(counter_dmg);
-                    status_msg += " You hit back for " + std::to_string(counter_dmg) + "!";
+                    combat_msg += " You hit back for " + std::to_string(counter_dmg) + "!";
 
                     if (ep->check_death()) {
-                        status_msg += " " + ep->name() + " killed! +" + std::to_string(ep->xp_value()) + " XP";
+                        combat_msg += " " + ep->name() + " killed! +" + std::to_string(ep->xp_value()) + " XP";
                         player.add_xp(ep->xp_value());
                         for (const auto& [item, qty] : ep->drops()) {
                             Entity de(ep->x(), ep->y(), item.glyph(), item.name(),
@@ -879,7 +1186,7 @@ int main(int argc, char* argv[]) {
                         }
                         world.remove_enemy_at(ep->x(), ep->y());
                     }
-                    status_timer = 90;
+                    log_msg(combat_msg);
                 }
             }
             // NPC turns
@@ -899,7 +1206,10 @@ int main(int argc, char* argv[]) {
         // Play time tracking
         play_time_timer++;
         if (play_time_timer >= 60) { play_time_timer = 0; play_time_seconds++; }
-        if (status_timer > 0) status_timer--;
+        // Message timers
+        for (auto& m : msg_log) m.timer--;
+        while (!msg_log.empty() && msg_log.front().timer <= 0)
+            msg_log.erase(msg_log.begin());
 
         // --- Render ---
         renderer.clear();
@@ -908,11 +1218,11 @@ int main(int argc, char* argv[]) {
         renderer.begin_frame(view_cols, view_rows);
 
         int cam_x = player.x() - view_cols / 2;
-        int cam_y = player.y() - view_rows / 2;
+        int cam_y = player.y() - (view_rows - 2) / 2; // 2 rows reserved for HUD
         // Unbounded camera — no map edge clamping
 
         // Tiles
-        for (int vy = 0; vy < view_rows; ++vy) {
+        for (int vy = 0; vy < view_rows - 2; ++vy) {
             for (int vx = 0; vx < view_cols; ++vx) {
                 int mx = cam_x + vx;
                 int my = cam_y + vy;
@@ -931,28 +1241,45 @@ int main(int argc, char* argv[]) {
                         cell.fg_g = static_cast<uint8_t>(cell.fg_g * 0.3f);
                         cell.fg_b = static_cast<uint8_t>(cell.fg_b * 0.3f);
                     }
-                }
 
-                if (world.in_bounds(mx, my) && world.get_tile(mx, my).visible) {
-                    Tile tile = world.get_tile(mx, my);
+                    // Zone tint (subtle, always shown on seen tiles)
+                    if (tile.visible || tile.explored) {
+                        const Zone* zone = world.zone_at(mx, my);
+                        if (zone) {
+                            uint8_t zr, zg, zb;
+                            zone_type_color(zone->type, zr, zg, zb);
+                            float f = tile.visible ? 0.35f : 0.15f;
+                            cell.bg_r = static_cast<uint8_t>(zr * f);
+                            cell.bg_g = static_cast<uint8_t>(zg * f);
+                            cell.bg_b = static_cast<uint8_t>(zb * f);
+                        }
+                    }
 
-                    // Check for items
-                    Entity* item = world.item_at(mx, my);
-                    if (item && !item->in_inventory()) {
-                        cell.glyph = item->glyph();
-                        cell.fg_r = item->fg_r(); cell.fg_g = item->fg_g(); cell.fg_b = item->fg_b();
-                    }
-                    // Check for NPCs
-                    Npc* npc = world.npc_at(mx, my);
-                    if (npc) {
-                        cell.glyph = npc->glyph();
-                        cell.fg_r = npc->fg_r(); cell.fg_g = npc->fg_g(); cell.fg_b = npc->fg_b();
-                    }
-                    // Check for enemies
-                    Enemy* enemy = world.enemy_at(mx, my);
-                    if (enemy) {
-                        cell.glyph = enemy->glyph();
-                        cell.fg_r = enemy->fg_r(); cell.fg_g = enemy->fg_g(); cell.fg_b = enemy->fg_b();
+                    if (tile.visible) {
+                        // Placed objects (torches, campfires) sit on top of terrain
+                        const PlacedObject* po = world.placed_object_at(mx, my);
+                        if (po) {
+                            cell.glyph = po->glyph;
+                            cell.fg_r = po->fg_r; cell.fg_g = po->fg_g; cell.fg_b = po->fg_b;
+                        }
+                        // Check for items
+                        Entity* item = world.item_at(mx, my);
+                        if (item && !item->in_inventory()) {
+                            cell.glyph = item->glyph();
+                            cell.fg_r = item->fg_r(); cell.fg_g = item->fg_g(); cell.fg_b = item->fg_b();
+                        }
+                        // Check for NPCs
+                        Npc* npc = world.npc_at(mx, my);
+                        if (npc) {
+                            cell.glyph = npc->glyph();
+                            cell.fg_r = npc->fg_r(); cell.fg_g = npc->fg_g(); cell.fg_b = npc->fg_b();
+                        }
+                        // Check for enemies
+                        Enemy* enemy = world.enemy_at(mx, my);
+                        if (enemy) {
+                            cell.glyph = enemy->glyph();
+                            cell.fg_r = enemy->fg_r(); cell.fg_g = enemy->fg_g(); cell.fg_b = enemy->fg_b();
+                        }
                     }
                 }
 
@@ -965,44 +1292,110 @@ int main(int argc, char* argv[]) {
             }
         }
 
-        // HUD bar
+        // Build mode cursor + selection preview
+        if (mode == GameMode::Build) {
+            int sx = build_cx - cam_x;
+            int sy = build_cy - cam_y;
+            if (sx >= 0 && sx < view_cols && sy >= 0 && sy < view_rows - 2) {
+                BuildTile bt = static_cast<BuildTile>(build_sel);
+                const BuildDef& def = build_def(bt);
+                Cell c;
+                c.glyph = def.glyph;
+                bool ok = build_can_afford(bt, player);
+                std::string reason;
+                ok = ok && build_can_place(bt, world, build_cx, build_cy, reason);
+                if (ok) { c.fg_r = 120; c.fg_g = 255; c.fg_b = 120; }
+                else    { c.fg_r = 255; c.fg_g = 80;  c.fg_b = 80; }
+                c.bg_r = 60; c.bg_g = 60; c.bg_b = 20;
+                renderer.set_cell(sx, sy, c);
+            }
+        }
+
+        // Zone mode selection preview
+        if (mode == GameMode::Zone) {
+            uint8_t zr, zg, zb;
+            zone_type_color(static_cast<ZoneType>(zone_type_sel), zr, zg, zb);
+            if (zone_anchored) {
+                int x0 = std::min(zone_ax, zone_cx);
+                int y0 = std::min(zone_ay, zone_cy);
+                int x1 = std::max(zone_ax, zone_cx);
+                int y1 = std::max(zone_ay, zone_cy);
+                for (int yy = y0; yy <= y1; ++yy) {
+                    for (int xx = x0; xx <= x1; ++xx) {
+                        int sx = xx - cam_x;
+                        int sy = yy - cam_y;
+                        if (sx < 0 || sx >= view_cols || sy < 0 || sy >= view_rows - 2) continue;
+                        Cell c;
+                        c.glyph = ' ';
+                        c.bg_r = static_cast<uint8_t>(zr * 0.5f);
+                        c.bg_g = static_cast<uint8_t>(zg * 0.5f);
+                        c.bg_b = static_cast<uint8_t>(zb * 0.5f);
+                        renderer.set_cell(sx, sy, c);
+                    }
+                }
+            }
+            int sx = zone_cx - cam_x;
+            int sy = zone_cy - cam_y;
+            if (sx >= 0 && sx < view_cols && sy >= 0 && sy < view_rows - 2) {
+                Cell c;
+                c.glyph = '+';
+                c.fg_r = 255; c.fg_g = 255; c.fg_b = 255;
+                c.bg_r = static_cast<uint8_t>(zr * 0.6f);
+                c.bg_g = static_cast<uint8_t>(zg * 0.6f);
+                c.bg_b = static_cast<uint8_t>(zb * 0.6f);
+                renderer.set_cell(sx, sy, c);
+            }
+        }
+
+        // ── HUD (2 rows) ───────────────────────────────────────────
         {
-            int hud_y = view_rows - 1;
+            int hud_y1 = view_rows - 2;
+            int hud_y2 = view_rows - 1;
             for (int x = 0; x < view_cols; ++x) {
                 Cell c; c.glyph = ' ';
                 c.bg_r = 20; c.bg_g = 20; c.bg_b = 30;
-                renderer.set_cell(x, hud_y, c);
+                renderer.set_cell(x, hud_y1, c);
+                renderer.set_cell(x, hud_y2, c);
             }
-            std::string hud = "HP:" + std::to_string(player.hp()) + "/" + std::to_string(player.max_hp()) +
-                              " ATK:" + std::to_string(player.total_attack() - player.total_damage_variance()) + "-" + std::to_string(player.total_attack() + player.total_damage_variance()) +
-                              " DEF:" + std::to_string(player.total_defense()) +
-                              " G:" + std::to_string(player.gold()) +
-                              " Wt:" + std::to_string(player.current_weight()) + "/" + std::to_string(player.carry_capacity()) +
-                              " Lv:" + std::to_string(player.level()) +
-                              " XP:" + std::to_string(player.xp()) + "/" + std::to_string(player.xp_to_next_level()) +
-                              " " + time_system.time_string() + " " + time_system.time_period_string();
+            std::string hud1 = "HP:" + std::to_string(player.hp()) + "/" + std::to_string(player.max_hp()) +
+                               " ATK:" + std::to_string(player.total_attack() - player.total_damage_variance()) + "-" + std::to_string(player.total_attack() + player.total_damage_variance()) +
+                               " DEF:" + std::to_string(player.total_defense()) +
+                               " G:" + std::to_string(player.gold()) +
+                               " Wt:" + std::to_string(player.current_weight()) + "/" + std::to_string(player.carry_capacity()) +
+                               " Lv:" + std::to_string(player.level()) +
+                               " XP:" + std::to_string(player.xp()) + "/" + std::to_string(player.xp_to_next_level());
+            std::string hud2 = "Day " + std::to_string(time_system.day()) +
+                               " " + time_system.time_string() + " " + time_system.time_period_string();
             // Biome indicator
             BiomeType biome = world.get_biome_at(player.x(), player.y());
-            hud += " [" + std::string(biome_name(biome)) + "]";
+            hud2 += " [" + std::string(biome_name(biome)) + "]";
             // Structure indicator
             StructureType structure = world.get_structure_at(player.x(), player.y());
             if (structure != StructureType::None) {
                 const StructureDef& sd = structure_def(structure);
-                hud += " " + std::string(sd.name);
+                hud2 += " " + std::string(sd.name);
             }
-            if (player.has_light_source()) hud += " [Torch]";
-            draw_string(renderer, 1, hud_y, hud, 180, 180, 180, 20, 20, 30);
+            if (player.has_light_source()) hud2 += " [Torch]";
+            draw_string(renderer, 1, hud_y1, hud1, 180, 180, 180, 20, 20, 30);
+            draw_string(renderer, 1, hud_y2, hud2, 140, 140, 160, 20, 20, 30);
         }
 
-        // Status message
-        if (status_timer > 0 && !status_msg.empty()) {
-            int msg_y = view_rows - 2;
-            for (int x = 0; x < static_cast<int>(status_msg.size()) + 2 && x < view_cols; ++x) {
-                Cell c; c.glyph = ' ';
-                c.bg_r = 40; c.bg_g = 40; c.bg_b = 20;
-                renderer.set_cell(x, msg_y, c);
+        // ── Message log (above HUD, newest at bottom) ──────────────
+        {
+            int base_y = view_rows - 3;
+            int i = 0;
+            for (auto it = msg_log.rbegin(); it != msg_log.rend() && i < 4; ++it, ++i) {
+                int y = base_y - i;
+                uint8_t bright = static_cast<uint8_t>(255 - i * 50);
+                uint8_t bgv = static_cast<uint8_t>(40 - i * 8);
+                for (int x = 0; x < static_cast<int>(it->text.size()) + 2 && x < view_cols; ++x) {
+                    Cell c; c.glyph = ' ';
+                    c.bg_r = bgv; c.bg_g = bgv; c.bg_b = static_cast<uint8_t>(bgv / 2);
+                    renderer.set_cell(x, y, c);
+                }
+                draw_string(renderer, 1, y, it->text, bright, bright, static_cast<uint8_t>(100 + i * 10),
+                            bgv, bgv, static_cast<uint8_t>(bgv / 2));
             }
-            draw_string(renderer, 1, msg_y, status_msg, 255, 255, 100, 40, 40, 20);
         }
 
         // --- Overlays ---
@@ -1017,11 +1410,7 @@ int main(int argc, char* argv[]) {
             int box_x = 2, box_y = 2;
             int panel_w = (box_w - 4) / 2;
 
-            for (int y = box_y; y < box_y + box_h; ++y)
-                for (int x = box_x; x < box_x + box_w; ++x) {
-                    Cell c; c.glyph = ' '; c.bg_r = 15; c.bg_g = 15; c.bg_b = 35;
-                    renderer.set_cell(x, y, c);
-                }
+            draw_box(renderer, box_x, box_y, box_w, box_h, 15, 15, 35);
 
             draw_string(renderer, box_x + 1, box_y, "INVENTORY", 255, 255, 255, 15, 15, 35);
             std::string wt = "Wt: " + std::to_string(player.current_weight()) + "/" + std::to_string(player.carry_capacity());
@@ -1104,11 +1493,7 @@ int main(int argc, char* argv[]) {
                 int ex_w = 40, ex_h = 8;
                 int ex_x = box_x + (box_w - ex_w) / 2;
                 int ex_y = box_y + (box_h - ex_h) / 2;
-                for (int y = ex_y; y < ex_y + ex_h; ++y)
-                    for (int x = ex_x; x < ex_x + ex_w; ++x) {
-                        Cell c; c.glyph = ' '; c.bg_r = 25; c.bg_g = 25; c.bg_b = 45;
-                        renderer.set_cell(x, y, c);
-                    }
+                draw_box(renderer, ex_x, ex_y, ex_w, ex_h, 25, 25, 45);
                 draw_string(renderer, ex_x + 1, ex_y, examine_item.name(), 255, 255, 255, 25, 25, 45);
                 draw_string(renderer, ex_x + 1, ex_y + 1, examine_item.description(), 180, 180, 180, 25, 25, 45);
                 std::string stats = "Wt:" + std::to_string(examine_item.weight()) + "  Val:" + std::to_string(examine_item.value());
@@ -1123,11 +1508,7 @@ int main(int argc, char* argv[]) {
                 int gw = 30, gh = static_cast<int>(inv.size()) + 4;
                 if (gh < 6) gh = 6;
                 int gx = box_x + 2, gy = box_y + box_h - gh - 1;
-                for (int y = gy; y < gy + gh; ++y)
-                    for (int x = gx; x < gx + gw; ++x) {
-                        Cell c; c.glyph = ' '; c.bg_r = 30; c.bg_g = 20; c.bg_b = 20;
-                        renderer.set_cell(x, y, c);
-                    }
+                draw_box(renderer, gx, gy, gw, gh, 30, 20, 20);
                 draw_string(renderer, gx + 1, gy, "Gift which item?", 255, 200, 200, 30, 20, 20);
                 for (int i = 0; i < static_cast<int>(inv.size()); ++i) {
                     int y = gy + 1 + i;
@@ -1146,6 +1527,168 @@ int main(int argc, char* argv[]) {
             }
 
             draw_string(renderer, doll_x, box_y + box_h - 1, "[TAB] switch", 100, 100, 100, 15, 15, 35);
+        }
+
+        // Craft overlay
+        if (mode == GameMode::Craft) {
+            const auto& recipes = recipe_db();
+            int box_w = 56;
+            if (box_w > view_cols - 4) box_w = view_cols - 4;
+            int box_h = static_cast<int>(recipes.size()) + 5;
+            if (box_h > view_rows - 6) box_h = view_rows - 6;
+            int box_x = (view_cols - box_w) / 2;
+            int box_y = 2;
+            draw_box(renderer, box_x, box_y, box_w, box_h, 15, 25, 20);
+
+            draw_string(renderer, box_x + 1, box_y, "CRAFTING", 255, 255, 255, 15, 25, 20);
+            int max_visible = box_h - 4;
+            int scroll = 0;
+            if (craft_cursor >= max_visible) scroll = craft_cursor - max_visible + 1;
+
+            for (int i = 0; i < max_visible && (i + scroll) < static_cast<int>(recipes.size()); ++i) {
+                int idx = i + scroll;
+                const Recipe& r = recipes[idx];
+                int y = box_y + 2 + i;
+                bool selected = (idx == craft_cursor);
+                bool can = craft_can_make(r, player);
+                uint8_t bgr = 15, bgg = 25, bgb = 20;
+                if (selected) { bgr = 35; bgg = 55; bgb = 40; }
+
+                std::string name = std::string(r.result);
+                if (r.result_qty > 1) name += " x" + std::to_string(r.result_qty);
+                uint8_t fr = can ? 200 : 90, fg = can ? 255 : 90, fb = can ? 200 : 90;
+                if (!can) { fr = 110; fg = 110; fb = 110; }
+                draw_string(renderer, box_x + 2, y, name, fr, fg, fb, bgr, bgg, bgb);
+
+                // Ingredients: "Wood 1/2, Iron Ore 0/2"
+                std::string ing;
+                for (size_t j = 0; j < r.ingredients.size(); ++j) {
+                    if (j > 0) ing += ", ";
+                    ing += std::string(r.ingredients[j].first) + " " +
+                           std::to_string(craft_count_of(player, r.ingredients[j].first)) + "/" +
+                           std::to_string(r.ingredients[j].second);
+                }
+                draw_string(renderer, box_x + 24, y, ing, 160, 160, 140, bgr, bgg, bgb);
+            }
+            draw_string(renderer, box_x + 1, box_y + box_h - 1, "[ENTER] craft  [ESC] close", 100, 100, 100, 15, 25, 20);
+        }
+
+        // Build overlay
+        if (mode == GameMode::Build) {
+            int box_w = 34;
+            int box_h = static_cast<int>(BuildTile::Count) + 4;
+            int box_x = 1, box_y = 1;
+            draw_box(renderer, box_x, box_y, box_w, box_h, 25, 20, 15);
+            draw_string(renderer, box_x + 1, box_y, "BUILD", 255, 255, 255, 25, 20, 15);
+
+            for (int i = 0; i < static_cast<int>(BuildTile::Count); ++i) {
+                BuildTile bt = static_cast<BuildTile>(i);
+                const BuildDef& def = build_def(bt);
+                int y = box_y + 2 + i;
+                bool selected = (i == build_sel);
+                bool can = build_can_afford(bt, player);
+                uint8_t bgr = 25, bgg = 20, bgb = 15;
+                if (selected) { bgr = 55; bgg = 45; bgb = 30; }
+
+                Cell gc; gc.glyph = def.glyph;
+                gc.fg_r = can ? 220 : 100; gc.fg_g = can ? 180 : 100; gc.fg_b = can ? 100 : 100;
+                gc.bg_r = bgr; gc.bg_g = bgg; gc.bg_b = bgb;
+                renderer.set_cell(box_x + 1, y, gc);
+
+                draw_string(renderer, box_x + 3, y, def.name, can ? 220 : 110, can ? 220 : 110, can ? 220 : 110, bgr, bgg, bgb);
+
+                // Material cost "2/1"
+                std::string cost;
+                for (size_t j = 0; j < def.materials.size(); ++j) {
+                    if (j > 0) cost += ",";
+                    int have = 0;
+                    for (const auto& [item, qty] : player.inventory())
+                        if (item.name() == def.materials[j].first) have += qty;
+                    cost += " " + std::to_string(have) + "/" + std::to_string(def.materials[j].second);
+                }
+                draw_string(renderer, box_x + 17, y, cost, 150, 150, 130, bgr, bgg, bgb);
+            }
+            draw_string(renderer, box_x + 1, box_y + box_h - 1, "[TAB] pick [ENT] build", 100, 100, 100, 25, 20, 15);
+        }
+
+        // Zone overlay
+        if (mode == GameMode::Zone) {
+            int box_w = 30;
+            int box_h = 6 + static_cast<int>(world.zones().size());
+            if (box_h > 14) box_h = 14;
+            int box_x = 1, box_y = 1;
+            draw_box(renderer, box_x, box_y, box_w, box_h, 20, 20, 30);
+            draw_string(renderer, box_x + 1, box_y, "ZONES", 255, 255, 255, 20, 20, 30);
+
+            if (zone_pick_type) {
+                draw_string(renderer, box_x + 1, box_y + 2, "Zone type:", 180, 180, 180, 20, 20, 30);
+                for (int i = 0; i < static_cast<int>(ZoneType::Count); ++i) {
+                    uint8_t zr, zg, zb;
+                    zone_type_color(static_cast<ZoneType>(i), zr, zg, zb);
+                    bool sel = (i == zone_type_sel);
+                    std::string s = (sel ? "> " : "  ") + std::string(zone_type_name(static_cast<ZoneType>(i)));
+                    draw_string(renderer, box_x + 2, box_y + 3 + i, s,
+                                sel ? 255 : zr + 80, sel ? 255 : zg + 80, sel ? 100 : zb + 80,
+                                20, 20, 30);
+                }
+            } else {
+                draw_string(renderer, box_x + 1, box_y + 2,
+                            zone_anchored ? "Pick second corner" : "Pick first corner",
+                            150, 150, 170, 20, 20, 30);
+                int y = box_y + 4;
+                for (const auto& z : world.zones()) {
+                    if (y >= box_y + box_h - 1) break;
+                    uint8_t zr, zg, zb;
+                    zone_type_color(z.type, zr, zg, zb);
+                    std::string s = std::string(zone_type_name(z.type)) + " (" +
+                                    std::to_string(z.x1 - z.x0 + 1) + "x" +
+                                    std::to_string(z.y1 - z.y0 + 1) + ")";
+                    draw_string(renderer, box_x + 2, y, s, zr + 100, zg + 100, zb + 100, 20, 20, 30);
+                    ++y;
+                }
+                if (world.zones().empty())
+                    draw_string(renderer, box_x + 2, y, "(none)", 90, 90, 90, 20, 20, 30);
+            }
+            draw_string(renderer, box_x + 1, box_y + box_h - 1, "[ENT] mark [X] del", 100, 100, 100, 20, 20, 30);
+        }
+
+        // Character sheet overlay
+        if (mode == GameMode::Character) {
+            int box_w = 34, box_h = 20;
+            int box_x = (view_cols - box_w) / 2;
+            int box_y = (view_rows - box_h) / 2;
+            draw_box(renderer, box_x, box_y, box_w, box_h, 20, 20, 40);
+            draw_string(renderer, box_x + 1, box_y, "CHARACTER", 255, 255, 255, 20, 20, 40);
+            std::string lv = "Level " + std::to_string(player.level()) +
+                             "  XP " + std::to_string(player.xp()) + "/" + std::to_string(player.xp_to_next_level());
+            draw_string(renderer, box_x + 1, box_y + 1, lv, 180, 180, 180, 20, 20, 40);
+
+            const PlayerStats& st = player.stats();
+            auto row = [&](int i, const char* name, int val, const std::string& note) {
+                std::string s = std::string(name) + " " + std::to_string(val);
+                draw_string(renderer, box_x + 2, box_y + 3 + i, s, 200, 200, 200, 20, 20, 40);
+                draw_string(renderer, box_x + 12, box_y + 3 + i, note, 120, 120, 150, 20, 20, 40);
+            };
+            row(0, "STR", st.str, "carry " + std::to_string(st.carry_capacity()));
+            row(1, "DEX", st.dex, "defense +" + std::to_string(st.defense_bonus()));
+            row(2, "CON", st.con, "max HP " + std::to_string(st.max_hp()));
+            row(3, "INT", st.intel, "arcana");
+            row(4, "WIS", st.wis, "perception " + std::to_string(st.perception()));
+            row(5, "CHA", st.cha, "social " + std::to_string(st.social_modifier()));
+
+            std::string atk = "Attack:  " + std::to_string(player.total_attack() - player.total_damage_variance()) +
+                              "-" + std::to_string(player.total_attack() + player.total_damage_variance());
+            std::string def = "Defense: " + std::to_string(player.total_defense());
+            std::string hp  = "HP:      " + std::to_string(player.hp()) + "/" + std::to_string(player.max_hp());
+            std::string au  = "Gold:    " + std::to_string(player.gold());
+            std::string wt  = "Weight:  " + std::to_string(player.current_weight()) + "/" + std::to_string(player.carry_capacity());
+            draw_string(renderer, box_x + 2, box_y + 10, atk, 220, 180, 140, 20, 20, 40);
+            draw_string(renderer, box_x + 2, box_y + 11, def, 160, 200, 160, 20, 20, 40);
+            draw_string(renderer, box_x + 2, box_y + 12, hp, 220, 140, 140, 20, 20, 40);
+            draw_string(renderer, box_x + 2, box_y + 13, au, 255, 215, 0, 20, 20, 40);
+            draw_string(renderer, box_x + 2, box_y + 14, wt, 160, 160, 160, 20, 20, 40);
+
+            draw_string(renderer, box_x + 1, box_y + box_h - 1, "[X/ESC] close", 100, 100, 100, 20, 20, 40);
         }
 
         // Dialogue overlay
@@ -1174,13 +1717,9 @@ int main(int argc, char* argv[]) {
 
                 int dh = static_cast<int>(wrapped.size()) + static_cast<int>(node.options.size()) + 4;
                 if (dh < 7) dh = 7;
-                int dx = 2, dy = view_rows - dh - 2;
+                int dx = 2, dy = view_rows - dh - 3;
 
-                for (int y = dy; y < dy + dh; ++y)
-                    for (int x = dx; x < dx + dw; ++x) {
-                        Cell c; c.glyph = ' '; c.bg_r = 20; c.bg_g = 20; c.bg_b = 40;
-                        renderer.set_cell(x, y, c);
-                    }
+                draw_box(renderer, dx, dy, dw, dh, 20, 20, 40);
 
                 draw_string(renderer, dx + 1, dy, npc.name(), npc.fg_r(), npc.fg_g(), npc.fg_b(), 20, 20, 40);
                 std::string aff = "Affinity: " + std::to_string(npc.affinity());
@@ -1207,31 +1746,52 @@ int main(int argc, char* argv[]) {
 
         // Pause menu overlay
         if (mode == GameMode::PauseMenu) {
-            int pw = 24, ph = 5;
+            int pw = 24, ph = 7;
             int px = (view_cols - pw) / 2, py = (view_rows - ph) / 2;
-            for (int y = py; y < py + ph; ++y)
-                for (int x = px; x < px + pw; ++x) {
-                    Cell c; c.glyph = ' '; c.bg_r = 20; c.bg_g = 20; c.bg_b = 40;
-                    renderer.set_cell(x, y, c);
-                }
+            draw_box(renderer, px, py, pw, ph, 20, 20, 40);
             draw_string(renderer, px + 1, py, "PAUSED", 255, 255, 255, 20, 20, 40);
-            std::string opts[] = {"Save Game", "Load Game", "Quit"};
-            for (int i = 0; i < 3; ++i) {
+            std::string opts[] = {"Save Game", "Load Game", "Settings", "Main Menu", "Quit"};
+            for (int i = 0; i < 5; ++i) {
                 uint8_t bg = (i == pause_cursor) ? 60 : 20;
                 std::string prefix = (i == pause_cursor) ? "> " : "  ";
                 draw_string(renderer, px + 2, py + 1 + i, prefix + opts[i], 200, 200, 200, bg, bg, 40);
             }
         }
 
+        // Settings overlay
+        if (mode == GameMode::Settings) {
+            int sw = 40, sh = 7;
+            int sx = (view_cols - sw) / 2, sy = (view_rows - sh) / 2;
+            draw_box(renderer, sx, sy, sw, sh, 20, 30, 20);
+            draw_string(renderer, sx + 1, sy, "SETTINGS", 255, 255, 255, 20, 30, 20);
+
+            std::string names[] = {"Chunk Load Radius", "Render Distance", "Simulation Distance"};
+            int vals[] = {settings.load_radius, settings.render_radius, settings.sim_radius};
+            for (int i = 0; i < 3; ++i) {
+                bool sel = (i == settings_cursor);
+                uint8_t bg = sel ? 50 : 20;
+                std::string s = (sel ? "> " : "  ") + names[i];
+                draw_string(renderer, sx + 2, sy + 2 + i, s, 200, 200, 200, bg, bg + 10, bg);
+                // Slider
+                int bx = sx + 24;
+                for (int v = 1; v <= 4; ++v) {
+                    Cell c;
+                    c.glyph = (v <= vals[i]) ? '#' : '-';
+                    c.fg_r = (v <= vals[i]) ? 120 : 60;
+                    c.fg_g = (v <= vals[i]) ? 220 : 60;
+                    c.fg_b = (v <= vals[i]) ? 120 : 60;
+                    c.bg_r = bg; c.bg_g = bg + 10; c.bg_b = bg;
+                    renderer.set_cell(bx + v, sy + 2 + i, c);
+                }
+            }
+            draw_string(renderer, sx + 1, sy + sh - 1, "[</>] adjust  [ESC] done", 100, 100, 100, 20, 30, 20);
+        }
+
         // Save/Load screen
         if (mode == GameMode::SaveGame || mode == GameMode::LoadGame) {
             int sw = 50, sh = MAX_SAVE_SLOTS + 4;
             int sx = (view_cols - sw) / 2, sy = (view_rows - sh) / 2;
-            for (int y = sy; y < sy + sh; ++y)
-                for (int x = sx; x < sx + sw; ++x) {
-                    Cell c; c.glyph = ' '; c.bg_r = 15; c.bg_g = 15; c.bg_b = 35;
-                    renderer.set_cell(x, y, c);
-                }
+            draw_box(renderer, sx, sy, sw, sh, 15, 15, 35);
 
             std::string title = (mode == GameMode::SaveGame) ? "SAVE GAME" : "LOAD GAME";
             draw_string(renderer, sx + 1, sy, title, 255, 255, 255, 15, 15, 35);
@@ -1270,11 +1830,15 @@ int main(int argc, char* argv[]) {
                 }
             std::string msg = "YOU DIED";
             draw_string(renderer, (view_cols - msg.size()) / 2, view_rows / 2 - 2, msg, 255, 50, 50, 30, 0, 0);
-            std::string prompt = "Press R to restart, ESC to quit";
+            std::string prompt = "Press R to restart, ESC for main menu";
             draw_string(renderer, (view_cols - prompt.size()) / 2, view_rows / 2, prompt, 180, 180, 180, 30, 0, 0);
         }
 
         renderer.render_grid();
+        if (!demo_shot.empty()) {
+            renderer.save_screenshot(demo_shot);
+            std::cout << "saved " << demo_shot << "\n";
+        }
         renderer.present();
         SDL_Delay(16);
     }

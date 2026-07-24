@@ -25,6 +25,11 @@ enum class TileType : uint8_t {
     Trap,       // Walkable but triggers effect
     Stairs_Down, // Cosmetic depth marker (walkable)
     Stairs_Up,  // Cosmetic depth marker (walkable)
+    // Player-built tiles (4D)
+    WoodWall,   // Player-built wooden wall (blocks movement + light)
+    WoodFloor,  // Player-built plank floor (walkable)
+    StoneFloor, // Player-built stone floor (walkable)
+    WoodDoor,   // Player-built wooden door (walkable)
 };
 
 struct Tile {
@@ -42,6 +47,7 @@ inline bool tile_blocks_movement(TileType t) {
         case TileType::Mountain:
         case TileType::DeepWater:
         case TileType::Wall_Dungeon:
+        case TileType::WoodWall:
             return true;
         default:
             return false;
@@ -55,6 +61,7 @@ inline bool tile_blocks_light(TileType t) {
         case TileType::Mountain:
         case TileType::Wall_Dungeon:
         case TileType::DeepWater:
+        case TileType::WoodWall:
             return true;
         default:
             return false;
@@ -82,6 +89,10 @@ inline uint32_t tile_glyph(TileType t) {
         case TileType::Trap:         return '^';
         case TileType::Stairs_Down:  return '>';
         case TileType::Stairs_Up:    return '<';
+        case TileType::WoodWall:     return '#';
+        case TileType::WoodFloor:    return '.';
+        case TileType::StoneFloor:   return '.';
+        case TileType::WoodDoor:     return '+';
         default: return ' ';
     }
 }
@@ -107,6 +118,10 @@ inline void tile_color(TileType t, uint8_t& r, uint8_t& g, uint8_t& b) {
         case TileType::Trap:         r = 180; g = 50;  b = 50;  break;
         case TileType::Stairs_Down:  r = 160; g = 160; b = 80;  break;
         case TileType::Stairs_Up:    r = 160; g = 160; b = 80;  break;
+        case TileType::WoodWall:     r = 150; g = 110; b = 60;  break;
+        case TileType::WoodFloor:    r = 170; g = 130; b = 80;  break;
+        case TileType::StoneFloor:   r = 150; g = 150; b = 150; break;
+        case TileType::WoodDoor:     r = 170; g = 120; b = 60;  break;
         default:                     r = 0;   g = 0;   b = 0;   break;
     }
 }

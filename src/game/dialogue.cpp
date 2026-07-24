@@ -129,3 +129,120 @@ std::vector<DialogueNode> build_wanderer_dialogue() {
           }},
     };
 }
+
+std::vector<DialogueNode> build_guard_dialogue() {
+    return {
+        // Node 0: Root
+        { "Halt! State your business. ...Ah, a traveler. Keep your weapon sheathed inside the village.",
+          {
+            {"Talk", DialogueAction::Talk, 1},
+            {"Gift", DialogueAction::Gift, -1},
+            {"Goodbye", DialogueAction::Exit, -1},
+          }},
+        // Node 1: Talk
+        { "We've had bandits on the roads and wolves in the woods. At night, worse things crawl out of the ruins.",
+          {
+            {"Talk", DialogueAction::Talk, 2},
+            {"Gift", DialogueAction::Gift, -1},
+            {"Goodbye", DialogueAction::Exit, -1},
+          }},
+        // Node 2: Talk deeper
+        { "If you're heading into the wilds, go armed and carry a torch. The dark hides more than shadows.",
+          {
+            {"Talk", DialogueAction::Talk, 1},
+            {"Gift", DialogueAction::Gift, -1},
+            {"Goodbye", DialogueAction::Exit, -1},
+          }},
+    };
+}
+
+std::vector<DialogueNode> build_blacksmith_dialogue() {
+    return {
+        // Node 0: Root
+        { "Welcome to the forge. Blades, armor, tools — all hammered by my own hand.",
+          {
+            {"Talk", DialogueAction::Talk, 1},
+            {"Trade", DialogueAction::Trade, -1},
+            {"Goodbye", DialogueAction::Exit, -1},
+          }},
+        // Node 1: Talk
+        { "Bring me iron rods and good planks and I can forge almost anything. Raw ore works too, if you find a smelter.",
+          {
+            {"Talk", DialogueAction::Talk, 2},
+            {"Trade", DialogueAction::Trade, -1},
+            {"Goodbye", DialogueAction::Exit, -1},
+          }},
+        // Node 2: Talk deeper
+        { "A steel blade will serve you far better than that old iron. And don't neglect a good shield — dead heroes swing no swords.",
+          {
+            {"Talk", DialogueAction::Talk, 1},
+            {"Trade", DialogueAction::Trade, -1},
+            {"Goodbye", DialogueAction::Exit, -1},
+          }},
+    };
+}
+
+std::vector<DialogueNode> build_farmer_dialogue() {
+    return {
+        // Node 0: Root
+        { "Fine day for it, isn't it? The soil's rich this season.",
+          {
+            {"Talk", DialogueAction::Talk, 1},
+            {"Gift", DialogueAction::Gift, -1},
+            {"Goodbye", DialogueAction::Exit, -1},
+          }},
+        // Node 1: Talk
+        { "Between the rats in the grain and the wolves in the pasture, it's a wonder we harvest anything at all.",
+          {
+            {"Talk", DialogueAction::Talk, 2},
+            {"Gift", DialogueAction::Gift, -1},
+            {"Goodbye", DialogueAction::Exit, -1},
+          }},
+        // Node 2: Talk deeper
+        { "If you ever settle down and designate a farm plot, I'd be happy to work it. A strong back is all I need.",
+          {
+            {"Talk", DialogueAction::Talk, 1},
+            {"Gift", DialogueAction::Gift, -1},
+            {"Goodbye", DialogueAction::Exit, -1},
+          }},
+    };
+}
+
+std::vector<DialogueNode> build_herbalist_dialogue() {
+    return {
+        // Node 0: Root
+        { "Shh... the mandrake is sleeping. What remedy do you seek, dear?",
+          {
+            {"Talk", DialogueAction::Talk, 1},
+            {"Trade", DialogueAction::Trade, -1},
+            {"Goodbye", DialogueAction::Exit, -1},
+          }},
+        // Node 1: Talk
+        { "Red petals for mending flesh, blue moss for clarity of mind. The swamp provides, if you know where to look.",
+          {
+            {"Talk", DialogueAction::Talk, 2},
+            {"Trade", DialogueAction::Trade, -1},
+            {"Goodbye", DialogueAction::Exit, -1},
+          }},
+        // Node 2: Talk deeper
+        { "Two small draughts, distilled together, make a far stronger elixir. Even an adventurer could manage it.",
+          {
+            {"Talk", DialogueAction::Talk, 1},
+            {"Trade", DialogueAction::Trade, -1},
+            {"Goodbye", DialogueAction::Exit, -1},
+          }},
+    };
+}
+
+std::vector<DialogueNode> dialogue_for_name(const std::string& name) {
+    if (name == "Merchant") return build_merchant_dialogue();
+    if (name == "Villager") return build_villager_dialogue();
+    if (name == "Old Sage") return build_sage_dialogue();
+    if (name == "Child") return build_child_dialogue();
+    if (name == "Wanderer") return build_wanderer_dialogue();
+    if (name == "Guard") return build_guard_dialogue();
+    if (name == "Blacksmith") return build_blacksmith_dialogue();
+    if (name == "Farmer") return build_farmer_dialogue();
+    if (name == "Herbalist") return build_herbalist_dialogue();
+    return {};
+}

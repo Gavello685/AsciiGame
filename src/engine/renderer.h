@@ -45,6 +45,9 @@ public:
     void set_cell(int x, int y, const Cell& cell);
     void render_grid();
 
+    // Dev tool: dump the current framebuffer to a BMP file (call after render_grid)
+    bool save_screenshot(const std::string& path);
+
     int cell_width() const { return cell_w_; }
     int cell_height() const { return cell_h_; }
 

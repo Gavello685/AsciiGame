@@ -70,6 +70,10 @@ static const StructureDef structure_defs[] = {
         {
             {'V', "npc", "Villager"},
             {'M', "npc", "Merchant"},
+            {'G', "npc", "Guard"},
+            {'B', "npc", "Blacksmith"},
+            {'F', "npc", "Farmer"},
+            {'H', "npc", "Herbalist"},
         }
     },
     // Cave
@@ -78,6 +82,7 @@ static const StructureDef structure_defs[] = {
         {
             {'G', "enemy", "Goblin"},
             {'R', "enemy", "Rat"},
+            {'B', "enemy", "Bat"},
         }
     },
     // Ruins
@@ -85,6 +90,7 @@ static const StructureDef structure_defs[] = {
         "Ruins", 9, 10, ruins_tiles,
         {
             {'S', "enemy", "Spider"},
+            {'Z', "enemy", "Zombie"},
         }
     },
     // Dungeon
@@ -94,6 +100,7 @@ static const StructureDef structure_defs[] = {
             {'G', "enemy", "Goblin"},
             {'O', "enemy", "Ogre"},
             {'T', "enemy", "Giant Spider"},
+            {'Z', "enemy", "Zombie"},
         }
     },
 };

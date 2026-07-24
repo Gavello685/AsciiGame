@@ -19,6 +19,11 @@ public:
     int turn_of_day() const { return turn_; }
     void set_turn_of_day(int t) { turn_ = t % CYCLE_LENGTH; }
 
+    int day() const { return day_; }
+    void set_day(int d) { day_ = d < 1 ? 1 : d; }
+
+    bool is_night() const { return time_of_day() == TimeOfDay::Night; }
+
     TimeOfDay time_of_day() const;
     uint8_t ambient_light() const;
     std::string time_string() const;
@@ -28,4 +33,5 @@ public:
 
 private:
     int turn_ = 150; // Start at midday (turn 150 = Day phase)
+    int day_ = 1;
 };

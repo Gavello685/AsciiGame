@@ -28,6 +28,9 @@ add_executable(ascii_game
     src/game/light.cpp
     src/game/biome.cpp
     src/game/structure.cpp
+    src/game/building.cpp
+    src/game/crafting.cpp
+    src/game/settings.cpp
 )
 
 target_include_directories(ascii_game PRIVATE

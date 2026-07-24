@@ -6,12 +6,13 @@
 #include "game/entity.h"
 #include "game/chunk.h"
 #include "game/time_system.h"
+#include "game/building.h"
 #include <string>
 #include <vector>
 
 class World;
 
-static const int SAVE_VERSION = 5;
+static const int SAVE_VERSION = 6;
 static const int MAX_SAVE_SLOTS = 8;
 
 struct SaveMeta {
@@ -72,6 +73,10 @@ struct GameState {
 
     // Time
     int turn_of_day = 150;
+    int day = 1;
+
+    // Zones (v6+)
+    std::vector<Zone> zones;
 
     // Per-chunk data (explored tiles, modifications, placed objects, entities)
     struct ChunkSave {

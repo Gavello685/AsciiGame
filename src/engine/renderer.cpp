@@ -86,6 +86,18 @@ void Renderer::begin_frame(int view_cols, int view_rows) {
     cells_.assign(grid_w_ * grid_h_, Cell{});
 }
 
+bool Renderer::save_screenshot(const std::string& path) {
+    int w, h;
+    if (SDL_GetRendererOutputSize(renderer_, &w, &h) != 0) return false;
+    SDL_Surface* surf = SDL_CreateRGBSurfaceWithFormat(0, w, h, 32, SDL_PIXELFORMAT_ARGB8888);
+    if (!surf) return false;
+    bool ok = SDL_RenderReadPixels(renderer_, nullptr, SDL_PIXELFORMAT_ARGB8888,
+                                   surf->pixels, surf->pitch) == 0;
+    if (ok) ok = SDL_SaveBMP(surf, path.c_str()) == 0;
+    SDL_FreeSurface(surf);
+    return ok;
+}
+
 void Renderer::render_grid() {
     SDL_Rect dest;
     dest.w = cell_w_;

@@ -197,6 +197,7 @@ bool save_game(int slot, const GameState& state) {
     ss << "    " << jstr("character_name", state.player_name) << "\n";
     ss << "    " << jint("play_time_seconds", state.meta.play_time_seconds) << "\n";
     ss << "    " << jint("turn_of_day", state.turn_of_day) << "\n";
+    ss << "    " << jint("day", state.day) << "\n";
     ss << "    " << jstr("timestamp", state.meta.timestamp, false) << "\n";
     ss << "  },\n";
 
@@ -248,6 +249,18 @@ bool save_game(int slot, const GameState& state) {
     ss << "  \"world\": {\n";
     ss << "    " << juint("seed", state.map_seed, false) << "\n";
     ss << "  },\n";
+
+    // Zones
+    ss << "  \"zones\": [\n";
+    for (int i = 0; i < static_cast<int>(state.zones.size()); ++i) {
+        const auto& z = state.zones[i];
+        ss << "    { " << jint("x0", z.x0) << " " << jint("y0", z.y0)
+           << " " << jint("x1", z.x1) << " " << jint("y1", z.y1)
+           << " " << jint("type", static_cast<int>(z.type), false) << " }";
+        if (i < static_cast<int>(state.zones.size()) - 1) ss << ",";
+        ss << "\n";
+    }
+    ss << "  ],\n";
 
     // NPCs
     ss << "  \"npcs\": [\n";
@@ -450,6 +463,23 @@ bool load_game(int slot, GameState& state) {
     state.meta.character_name = extract_string(json, "character_name");
     state.meta.play_time_seconds = extract_int(json, "play_time_seconds");
     state.turn_of_day = extract_int(json, "turn_of_day", 150);
+    state.day = extract_int(json, "day", 1);
+
+    // Zones (v6+; absent in older saves)
+    state.zones.clear();
+    {
+        std::string z_arr = extract_array(json, "zones");
+        auto objs = split_array_objects(z_arr);
+        for (const auto& obj : objs) {
+            Zone z;
+            z.x0 = extract_int(obj, "x0");
+            z.y0 = extract_int(obj, "y0");
+            z.x1 = extract_int(obj, "x1");
+            z.y1 = extract_int(obj, "y1");
+            z.type = static_cast<ZoneType>(extract_int(obj, "type"));
+            state.zones.push_back(z);
+        }
+    }
 
     // NPCs
     state.npcs.clear();
@@ -677,6 +707,7 @@ GameState capture_state(const Player& player, const World& world,
 
     // World
     state.map_seed = map_seed;
+    state.zones = world.zones();
 
     // Per-chunk data (explored tiles, modifications, placed objects)
     auto chunk_data = world.gather_save_data();
@@ -753,6 +784,7 @@ GameState capture_state(const Player& player, const World& world,
     state.meta.character_name = state.player_name;
     state.meta.play_time_seconds = play_time_seconds;
     state.turn_of_day = time_system.turn_of_day();
+    state.day = time_system.day();
 
     time_t now = time(nullptr);
     char buf[64];
@@ -779,23 +811,18 @@ void apply_chunk_data(World& world, const std::vector<GameState::ChunkSave>& chu
 
         // Apply per-chunk entities
         for (const auto& ns : cs.npcs) {
-            std::vector<DialogueNode> dialogue;
-            if (ns.name == "Merchant") dialogue = build_merchant_dialogue();
-            else if (ns.name == "Villager") dialogue = build_villager_dialogue();
-            else if (ns.name == "Old Sage") dialogue = build_sage_dialogue();
-            else if (ns.name == "Child") dialogue = build_child_dialogue();
-            else if (ns.name == "Wanderer") dialogue = build_wanderer_dialogue();
-
             world.spawn_npc(Npc(ns.x, ns.y, ns.glyph, ns.name,
                                 ns.fg_r, ns.fg_g, ns.fg_b,
                                 ns.is_merchant, ns.affinity,
-                                dialogue, ns.shop_inventory));
+                                dialogue_for_name(ns.name), ns.shop_inventory));
         }
         for (const auto& es : cs.enemies) {
-            world.spawn_enemy(Enemy(es.x, es.y, es.glyph, es.name,
-                                    es.fg_r, es.fg_g, es.fg_b,
-                                    es.hp, es.max_hp, es.attack, es.defense,
-                                    es.damage_variance, es.xp_value));
+            Enemy e(es.x, es.y, es.glyph, es.name,
+                    es.fg_r, es.fg_g, es.fg_b,
+                    es.hp, es.max_hp, es.attack, es.defense,
+                    es.damage_variance, es.xp_value);
+            e.assign_default_drops(); // drops are not serialized; restore by name
+            world.spawn_enemy(std::move(e));
         }
         for (const auto& wis : cs.world_items) {
             Entity e(wis.x, wis.y, wis.glyph, wis.item_name,

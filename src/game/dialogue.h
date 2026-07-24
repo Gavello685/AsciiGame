@@ -37,3 +37,19 @@ std::vector<DialogueNode> build_child_dialogue();
 
 // Builds a wanderer dialogue tree
 std::vector<DialogueNode> build_wanderer_dialogue();
+
+// Builds a guard dialogue tree
+std::vector<DialogueNode> build_guard_dialogue();
+
+// Builds a blacksmith dialogue tree
+std::vector<DialogueNode> build_blacksmith_dialogue();
+
+// Builds a farmer dialogue tree
+std::vector<DialogueNode> build_farmer_dialogue();
+
+// Builds a herbalist dialogue tree
+std::vector<DialogueNode> build_herbalist_dialogue();
+
+// Rebuild a dialogue tree from an NPC name (used on load).
+// Returns an empty tree for unknown names.
+std::vector<DialogueNode> dialogue_for_name(const std::string& name);

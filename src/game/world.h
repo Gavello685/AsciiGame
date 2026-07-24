@@ -6,6 +6,7 @@
 #include "game/enemy.h"
 #include "game/biome.h"
 #include "game/structure.h"
+#include "game/building.h"
 #include <unordered_map>
 #include <vector>
 #include <functional>
@@ -85,6 +86,7 @@ public:
 
     // Placed objects
     void add_placed_object(int world_x, int world_y, const PlacedObject& obj);
+    const PlacedObject* placed_object_at(int world_x, int world_y) const;
 
     // Biome/structure queries (world-space)
     BiomeType get_biome_at(int world_x, int world_y) const;
@@ -137,6 +139,13 @@ public:
     // Spawn entities for a structure (used on first visit + forced spawn)
     void spawn_structure_entities(Chunk& chunk, int cx, int cy, StructureType stype);
 
+    // ── Zones ─────────────────────────────────────────────────────
+    void add_zone(const Zone& z);
+    bool remove_zone_at(int wx, int wy);
+    const Zone* zone_at(int wx, int wy) const;
+    const std::vector<Zone>& zones() const { return zones_; }
+    void clear_zones() { zones_.clear(); }
+
     // Per-chunk save/load support
     struct ChunkSaveData {
         int cx, cy;
@@ -165,6 +174,7 @@ private:
 
     std::unordered_map<ChunkCoord, Chunk, ChunkCoordHash> chunks_;
     std::unordered_map<ChunkCoord, ChunkEntities, ChunkCoordHash> entities_;
+    std::vector<Zone> zones_;
 
     // Helpers for first-visit chunk setup
     void spawn_biome_entities(Chunk& chunk, int cx, int cy);
