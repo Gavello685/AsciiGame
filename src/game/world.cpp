@@ -519,6 +519,24 @@ StructureType World::get_structure_at(int world_x, int world_y) const {
     return static_cast<StructureType>(chunk->structure_id());
 }
 
+World::ChunkMapInfo World::chunk_map_info(int cx, int cy) const {
+    const Chunk* chunk = get_chunk(cx, cy);
+    if (chunk) {
+        return {static_cast<BiomeType>(chunk->biome_id()),
+                static_cast<StructureType>(chunk->structure_id())};
+    }
+
+    // Ungenerated chunk: predict deterministically (same rules as generation)
+    int center_wx = cx * CHUNK_SIZE + CHUNK_SIZE / 2;
+    int center_wy = cy * CHUNK_SIZE + CHUNK_SIZE / 2;
+    BiomeType biome = determine_biome(center_wx, center_wy, seed_);
+    StructureType st = decide_structure(cx, cy, biome, seed_);
+    // Origin chunk always holds a village
+    if (st == StructureType::None && cx == 0 && cy == 0)
+        st = StructureType::Village;
+    return {biome, st};
+}
+
 // ── Zones ─────────────────────────────────────────────────────────
 
 void World::add_zone(const Zone& z) {

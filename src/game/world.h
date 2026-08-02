@@ -92,6 +92,16 @@ public:
     BiomeType get_biome_at(int world_x, int world_y) const;
     StructureType get_structure_at(int world_x, int world_y) const;
 
+    // Per-chunk summary for the world map view
+    struct ChunkMapInfo {
+        BiomeType biome = BiomeType::Grassland;
+        StructureType structure = StructureType::None;
+    };
+
+    // Biome + structure for a chunk. Uses the live chunk when loaded;
+    // otherwise predicts deterministically (matches what generation will produce).
+    ChunkMapInfo chunk_map_info(int cx, int cy) const;
+
     // ── Entity management (per-chunk storage) ────────────────────────
 
     // Spawn entities
