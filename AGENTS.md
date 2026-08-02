@@ -32,6 +32,11 @@ Start-Process -FilePath "C:\Users\gavel\OneDrive\Documents\Opencode Projects\ASC
 MSYS2 install path: `C:\msys64`
 Installed packages: `mingw-w64-x86_64-gcc`, `mingw-w64-x86_64-cmake`, `mingw-w64-x86_64-SDL2`, `mingw-w64-x86_64-SDL2_ttf`, `mingw-w64-x86_64-make`
 
+## Build fix (2026-08-01)
+
+- Use the **MSYS2 cmake** (`C:\msys64\mingw64\bin\cmake.exe`), NOT the one in `C:\Program Files\CMake` — the stock one fails the compiler test against MinGW GCC.
+- Runtime DLLs (SDL2, SDL2_ttf, libgcc, libstdc++, libwinpthread) are now copied to the build dir automatically by a CMake POST_BUILD step (see end of CMakeLists.txt). Set `MSYS2_DLL_DIR` if MSYS2 is elsewhere.
+
 ## Structure
 
 ```

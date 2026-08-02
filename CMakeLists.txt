@@ -48,3 +48,32 @@ target_link_libraries(ascii_game PRIVATE
     ${SDL2_LIBRARIES}
     ${SDL2_TTF_LIBRARIES}
 )
+
+# Copy required runtime DLLs next to the executable so it runs outside MSYS2.
+# This is the FULL dependency closure (SDL2_ttf pulls in freetype/harfbuzz/glib/etc).
+# Adjust MSYS2_DLL_DIR if your MSYS2 lives elsewhere.
+set(MSYS2_DLL_DIR "C:/msys64/mingw64/bin" CACHE PATH "Directory containing SDL2/MinGW runtime DLLs")
+set(GAME_DLLS
+    SDL2.dll
+    SDL2_ttf.dll
+    libgcc_s_seh-1.dll
+    libstdc++-6.dll
+    libwinpthread-1.dll
+    libfreetype-6.dll
+    libharfbuzz-0.dll
+    libbrotlidec.dll
+    libbrotlicommon.dll
+    libbz2-1.dll
+    libpng16-16.dll
+    zlib1.dll
+    libglib-2.0-0.dll
+    libgraphite2.dll
+    libiconv-2.dll
+    libintl-8.dll
+    libpcre2-8-0.dll
+)
+foreach(dll ${GAME_DLLS})
+    add_custom_command(TARGET ascii_game POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${MSYS2_DLL_DIR}/${dll}" "$<TARGET_FILE_DIR:ascii_game>/${dll}")
+endforeach()
