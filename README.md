@@ -26,6 +26,7 @@ A single-character ASCII roguelike RPG built in C++17 with SDL2. Features an inf
 | Enter | Interact / confirm |
 | `B` | Build mode |
 | `Z` | Zone designation |
+| `M` | World map view (biomes + structures) |
 | `R` | Restart (when dead) |
 | Escape | Back / close overlay |
 

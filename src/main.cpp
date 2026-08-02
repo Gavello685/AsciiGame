@@ -27,6 +27,9 @@
 static const int FONT_SIZE = 20;
 static const int BUILD_RANGE = 6;
 
+// World map view: chunks shown in each direction from the player's chunk
+static const int MAP_RADIUS = 10;
+
 static const char* slot_names[] = {
     "None", "Head", "L Shoulder", "R Shoulder", "Torso",
     "L Arm", "R Arm", "L Hand", "R Hand",
@@ -50,6 +53,7 @@ enum class GameMode {
     Build,
     Zone,
     Character,
+    Map,
 };
 
 static void draw_string(Renderer& r, int x, int y, const std::string& s,
@@ -163,6 +167,11 @@ int main(int argc, char* argv[]) {
     // Craft mode state
     int craft_cursor = 0;
 
+    // World map view state
+    int map_cursor_cx = 0, map_cursor_cy = 0;
+    int map_cache_cx = 0, map_cache_cy = 0;
+    std::vector<World::ChunkMapInfo> map_cache;
+
     // Structure discovery (chunk coords of discovered structures)
     std::set<std::pair<int,int>> discovered_structures;
 
@@ -176,7 +185,9 @@ int main(int argc, char* argv[]) {
 
     // ── New game initialization ────────────────────────────────────
     auto start_new_game = [&]() {
-        map_seed = static_cast<uint32_t>(std::time(nullptr)) + static_cast<uint32_t>(std::rand());
+        // Demo mode uses a fixed seed so screenshots are reproducible
+        map_seed = demo_mode ? 20260801u
+                             : static_cast<uint32_t>(std::time(nullptr)) + static_cast<uint32_t>(std::rand());
         world = World();
         world.init(map_seed);
         world.set_load_radius(settings.load_radius);
@@ -395,9 +406,13 @@ int main(int argc, char* argv[]) {
                 case 160: demo_push_key(SDLK_x); break;
                 case 170: demo_shot = "demo6_char.bmp"; break;
                 case 180: demo_push_key(SDLK_ESCAPE); break;
-                case 190: demo_push_key(SDLK_ESCAPE); break;
-                case 200: demo_shot = "demo7_pause.bmp"; break;
-                case 210: running = false; break;
+                case 190: demo_push_key(SDLK_m); break;
+                case 210: demo_push_key(SDLK_d); break;
+                case 220: demo_shot = "demo7_map.bmp"; break;
+                case 230: demo_push_key(SDLK_ESCAPE); break;
+                case 240: demo_push_key(SDLK_ESCAPE); break;
+                case 250: demo_shot = "demo8_pause.bmp"; break;
+                case 260: running = false; break;
                 default: break;
             }
             demo_frame++;
@@ -902,6 +917,34 @@ int main(int argc, char* argv[]) {
                 continue;
             }
 
+            // --- World map mode ---
+            if (mode == GameMode::Map) {
+                if (key == SDLK_ESCAPE || key == SDLK_m) {
+                    mode = GameMode::Normal;
+                    continue;
+                }
+                int mdx = 0, mdy = 0;
+                switch (key) {
+                    case SDLK_w: case SDLK_UP:    mdy = -1; break;
+                    case SDLK_s: case SDLK_DOWN:  mdy =  1; break;
+                    case SDLK_a: case SDLK_LEFT:  mdx = -1; break;
+                    case SDLK_d: case SDLK_RIGHT: mdx =  1; break;
+                    default: break;
+                }
+                if (mdx != 0 || mdy != 0) {
+                    int pcx = World::world_to_chunk_x(player.x());
+                    int pcy = World::world_to_chunk_y(player.y());
+                    int ncx = map_cursor_cx + mdx;
+                    int ncy = map_cursor_cy + mdy;
+                    // Keep cursor within the visible map radius
+                    if (std::abs(ncx - pcx) <= MAP_RADIUS && std::abs(ncy - pcy) <= MAP_RADIUS) {
+                        map_cursor_cx = ncx;
+                        map_cursor_cy = ncy;
+                    }
+                }
+                continue;
+            }
+
             // --- Normal mode ---
             if (mode == GameMode::Normal) {
                 if (key == SDLK_ESCAPE) {
@@ -936,6 +979,12 @@ int main(int argc, char* argv[]) {
                 }
                 if (key == SDLK_x) {
                     mode = GameMode::Character;
+                    continue;
+                }
+                if (key == SDLK_m) {
+                    mode = GameMode::Map;
+                    map_cursor_cx = World::world_to_chunk_x(player.x());
+                    map_cursor_cy = World::world_to_chunk_y(player.y());
                     continue;
                 }
 
@@ -1689,6 +1738,153 @@ int main(int argc, char* argv[]) {
             draw_string(renderer, box_x + 2, box_y + 14, wt, 160, 160, 160, 20, 20, 40);
 
             draw_string(renderer, box_x + 1, box_y + box_h - 1, "[X/ESC] close", 100, 100, 100, 20, 20, 40);
+        }
+
+        // World map overlay
+        if (mode == GameMode::Map) {
+            const int R = MAP_RADIUS;
+            const int grid = 2 * R + 1;   // 21x21 chunks
+            const int legend_w = 24;
+            int box_w = grid + 2 + legend_w;
+            int box_h = grid + 2 + 2;     // title + grid + status
+            int box_x = (view_cols - box_w) / 2;
+            int box_y = (view_rows - box_h) / 2;
+            if (box_x < 0) box_x = 0;
+            if (box_y < 1) box_y = 1;
+
+            int pcx = World::world_to_chunk_x(player.x());
+            int pcy = World::world_to_chunk_y(player.y());
+
+            // Rebuild the chunk cache when the player moves to a new chunk
+            if (map_cache.size() != static_cast<size_t>(grid * grid) ||
+                map_cache_cx != pcx || map_cache_cy != pcy) {
+                map_cache.resize(grid * grid);
+                map_cache_cx = pcx;
+                map_cache_cy = pcy;
+                for (int dy = -R; dy <= R; ++dy)
+                    for (int dx = -R; dx <= R; ++dx)
+                        map_cache[(dy + R) * grid + (dx + R)] = world.chunk_map_info(pcx + dx, pcy + dy);
+            }
+
+            draw_box(renderer, box_x, box_y, box_w, box_h, 15, 15, 30);
+
+            // Title + hint
+            draw_string(renderer, box_x + 1, box_y, " WORLD MAP", 255, 255, 255, 15, 15, 30);
+            std::string hint = "[WASD move  M/ESC close]";
+            draw_string(renderer, box_x + box_w - static_cast<int>(hint.size()) - 1, box_y,
+                        hint, 110, 110, 130, 15, 15, 30);
+
+            // Border around the grid
+            for (int i = 0; i < grid + 2; ++i) {
+                Cell b; b.glyph = '#';
+                b.fg_r = 90; b.fg_g = 90; b.fg_b = 120;
+                b.bg_r = 15; b.bg_g = 15; b.bg_b = 30;
+                renderer.set_cell(box_x + i, box_y + 1, b);
+                renderer.set_cell(box_x + i, box_y + 2 + grid, b);
+            }
+            for (int i = 0; i < grid; ++i) {
+                Cell b; b.glyph = '#';
+                b.fg_r = 90; b.fg_g = 90; b.fg_b = 120;
+                b.bg_r = 15; b.bg_g = 15; b.bg_b = 30;
+                renderer.set_cell(box_x, box_y + 2 + i, b);
+                renderer.set_cell(box_x + grid + 1, box_y + 2 + i, b);
+            }
+
+            // Structure glyph colors
+            auto struct_color = [](StructureType st, uint8_t& r, uint8_t& g, uint8_t& b) {
+                switch (st) {
+                    case StructureType::Village: r = 255; g = 215; b =  90; break;
+                    case StructureType::Cave:    r = 210; g = 140; b =  90; break;
+                    case StructureType::Ruins:   r = 170; g = 170; b = 190; break;
+                    case StructureType::Dungeon: r = 195; g =  70; b =  70; break;
+                    default:                     r = 255; g = 255; b = 255; break;
+                }
+            };
+
+            // Chunk cells
+            for (int dy = -R; dy <= R; ++dy) {
+                for (int dx = -R; dx <= R; ++dx) {
+                    const World::ChunkMapInfo& info = map_cache[(dy + R) * grid + (dx + R)];
+                    const BiomeConfig& bc = biome_config(info.biome);
+                    int sx = box_x + 1 + (dx + R);
+                    int sy = box_y + 2 + (dy + R);
+
+                    Cell c;
+                    c.glyph = '.';
+                    c.fg_r = bc.hud_r; c.fg_g = bc.hud_g; c.fg_b = bc.hud_b;
+                    c.bg_r = bc.hud_r / 3; c.bg_g = bc.hud_g / 3; c.bg_b = bc.hud_b / 3;
+
+                    if (info.structure != StructureType::None) {
+                        const StructureDef& sd = structure_def(info.structure);
+                        c.glyph = sd.name[0];
+                        struct_color(info.structure, c.fg_r, c.fg_g, c.fg_b);
+                    }
+
+                    bool is_player = (dx == 0 && dy == 0);
+                    bool is_cursor = (pcx + dx == map_cursor_cx && pcy + dy == map_cursor_cy);
+
+                    if (is_player) {
+                        c.glyph = '@';
+                        c.fg_r = 0; c.fg_g = 255; c.fg_b = 0;
+                        c.bg_r = 20; c.bg_g = 50; c.bg_b = 20;
+                    }
+                    if (is_cursor) {
+                        // Cursor highlight: light background, dark glyph
+                        c.bg_r = 230; c.bg_g = 230; c.bg_b = 205;
+                        if (is_player) { c.fg_r = 0; c.fg_g = 130; c.fg_b = 0; }
+                        else           { c.fg_r = 20; c.fg_g = 20; c.fg_b = 20; }
+                    }
+                    renderer.set_cell(sx, sy, c);
+                }
+            }
+
+            // Status line: chunk under the cursor
+            int relx = map_cursor_cx - pcx;
+            int rely = map_cursor_cy - pcy;
+            const World::ChunkMapInfo& ci = map_cache[(rely + R) * grid + (relx + R)];
+            std::string status = biome_name(ci.biome);
+            if (ci.structure != StructureType::None)
+                status += std::string(" | ") + structure_def(ci.structure).name;
+            status += "  (" + std::to_string(map_cursor_cx) + "," + std::to_string(map_cursor_cy) + ")";
+            if (relx == 0 && rely == 0) {
+                status += "  [you]";
+            } else {
+                std::string dir;
+                if (rely < 0) dir += std::to_string(-rely) + "N";
+                if (rely > 0) dir += std::to_string(rely) + "S";
+                if (relx < 0) dir += std::to_string(-relx) + "W";
+                if (relx > 0) dir += std::to_string(relx) + "E";
+                status += "  " + dir;
+            }
+            draw_string(renderer, box_x + 1, box_y + box_h - 1, status,
+                        200, 200, 200, 15, 15, 30);
+
+            // Legend (right side of the box)
+            int lx = box_x + grid + 3;
+            draw_string(renderer, lx, box_y + 1, "BIOMES", 150, 150, 170, 15, 15, 30);
+            for (int i = 0; i < static_cast<int>(BiomeType::BiomeCount); ++i) {
+                BiomeType bt = static_cast<BiomeType>(i);
+                const BiomeConfig& bc = biome_config(bt);
+                Cell sw; sw.glyph = '#';
+                sw.fg_r = bc.hud_r; sw.fg_g = bc.hud_g; sw.fg_b = bc.hud_b;
+                sw.bg_r = 15; sw.bg_g = 15; sw.bg_b = 30;
+                renderer.set_cell(lx, box_y + 2 + i, sw);
+                draw_string(renderer, lx + 2, box_y + 2 + i, biome_name(bt), 180, 180, 180, 15, 15, 30);
+            }
+            int ly = box_y + 2 + static_cast<int>(BiomeType::BiomeCount) + 1;
+            draw_string(renderer, lx, ly, "STRUCTURES", 150, 150, 170, 15, 15, 30);
+            for (int i = 1; i < static_cast<int>(StructureType::StructureCount); ++i) {
+                StructureType st = static_cast<StructureType>(i);
+                const StructureDef& sd = structure_def(st);
+                uint8_t cr, cg, cb;
+                struct_color(st, cr, cg, cb);
+                Cell sw; sw.glyph = sd.name[0];
+                sw.fg_r = cr; sw.fg_g = cg; sw.fg_b = cb;
+                sw.bg_r = 15; sw.bg_g = 15; sw.bg_b = 30;
+                renderer.set_cell(lx, ly + 1 + i, sw);
+                draw_string(renderer, lx + 2, ly + 1 + i, sd.name, 180, 180, 180, 15, 15, 30);
+            }
+            draw_string(renderer, lx, box_y + box_h - 1, "@ = you", 0, 255, 0, 15, 15, 30);
         }
 
         // Dialogue overlay
