@@ -141,23 +141,28 @@ void stamp_structure(Chunk& chunk, int origin_lx, int origin_ly, StructureType t
     chunk.mark_dirty();
 }
 
-bool try_place_structure(Chunk& chunk, int cx, int cy, uint32_t seed) {
-    BiomeType biome = static_cast<BiomeType>(chunk.biome_id());
+// Uniform deterministic hash of (cx, cy, seed) -> [0, 1).
+// Used for structure chance rolls: noise values are bell-shaped around 0.5 and
+// never reach the low end, so thresholding noise made structures impossible
+// to spawn (only the force-placed origin village ever existed).
+static float hash01(int cx, int cy, uint32_t seed) {
+    uint32_t h = seed;
+    h ^= static_cast<uint32_t>(cx) * 0x9E3779B1u;
+    h ^= static_cast<uint32_t>(cy) * 0x85EBCA77u;
+    h ^= h >> 16; h *= 0x85EBCA77u; h ^= h >> 13;
+    h *= 0xC2B2AE35u; h ^= h >> 16;
+    return static_cast<float>(h) / 4294967296.0f;
+}
+
+StructureType decide_structure(int cx, int cy, BiomeType biome, uint32_t seed) {
     const BiomeConfig& bc = biome_config(biome);
 
-    if (!bc.has_structures) return false;
+    if (!bc.has_structures) return StructureType::None;
 
-    // Deterministic chance check per chunk
-    float chance_noise = noise::fractal2d(
-        static_cast<float>(cx) * 0.7f + 5000.0f,
-        static_cast<float>(cy) * 0.7f + 5000.0f,
-        1, 0.5f);
-    float chance = noise::normalize(chance_noise);
-
-    if (chance > bc.structure_chance) return false;
+    // Deterministic chance roll per chunk (true uniform probability)
+    if (hash01(cx, cy, seed) >= bc.structure_chance) return StructureType::None;
 
     // Determine structure type from biome
-    StructureType stype;
     float type_noise = noise::fractal2d(
         static_cast<float>(cx) * 1.3f + 6000.0f,
         static_cast<float>(cy) * 1.3f + 6000.0f,
@@ -166,26 +171,26 @@ bool try_place_structure(Chunk& chunk, int cx, int cy, uint32_t seed) {
 
     switch (biome) {
         case BiomeType::Grassland:
-            stype = type_val < 0.6f ? StructureType::Village : StructureType::Ruins;
-            break;
+            return type_val < 0.6f ? StructureType::Village : StructureType::Ruins;
         case BiomeType::Forest:
-            stype = type_val < 0.5f ? StructureType::Ruins : StructureType::Cave;
-            break;
+            return type_val < 0.5f ? StructureType::Ruins : StructureType::Cave;
         case BiomeType::Desert:
-            stype = StructureType::Ruins;
-            break;
+            return StructureType::Ruins;
         case BiomeType::Swamp:
-            stype = StructureType::Ruins;
-            break;
+            return StructureType::Ruins;
         case BiomeType::Mountain:
-            stype = type_val < 0.6f ? StructureType::Cave : StructureType::Dungeon;
-            break;
+            return type_val < 0.6f ? StructureType::Cave : StructureType::Dungeon;
         case BiomeType::Tundra:
-            stype = StructureType::Ruins;
-            break;
+            return StructureType::Ruins;
         default:
-            return false;
+            return StructureType::None;
     }
+}
+
+bool try_place_structure(Chunk& chunk, int cx, int cy, uint32_t seed) {
+    BiomeType biome = static_cast<BiomeType>(chunk.biome_id());
+    StructureType stype = decide_structure(cx, cy, biome, seed);
+    if (stype == StructureType::None) return false;
 
     const StructureDef& def = structure_def(stype);
 

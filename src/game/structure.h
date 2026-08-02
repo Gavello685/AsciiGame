@@ -34,6 +34,11 @@ struct StructureDef {
 // Get structure definition
 const StructureDef& structure_def(StructureType type);
 
+// Decide which structure (if any) belongs in chunk (cx, cy) for a biome.
+// Pure/deterministic: used by chunk generation AND the world map view so
+// ungenerated chunks show the same structures they will have when generated.
+StructureType decide_structure(int cx, int cy, BiomeType biome, uint32_t seed);
+
 // Try to place a structure in a chunk (returns true if placed)
 bool try_place_structure(Chunk& chunk, int cx, int cy, uint32_t seed);
 
