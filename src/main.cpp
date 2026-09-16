@@ -15,6 +15,8 @@
 #include "game/building.h"
 #include "game/crafting.h"
 #include "game/settings.h"
+#include "game/rng.h"
+#include "game/turn.h"
 #include <iostream>
 #include <string>
 #include <vector>
@@ -26,6 +28,10 @@
 
 static const int FONT_SIZE = 20;
 static const int BUILD_RANGE = 6;
+
+// PLAN.md 4B: base FOV radius at WIS 10, before the perception bonus and the
+// ambient-light scaling applied in the FOV update.
+static const int FOV_BASE_RADIUS = 8;
 
 // World map view: chunks shown in each direction from the player's chunk
 static const int MAP_RADIUS = 10;
@@ -80,8 +86,6 @@ static void draw_box(Renderer& r, int x, int y, int w, int h,
 }
 
 int main(int argc, char* argv[]) {
-    std::srand(static_cast<unsigned>(std::time(nullptr)));
-
     // Dev tool: --demo runs a scripted UI walkthrough, writing BMP screenshots
     bool demo_mode = (argc > 1 && std::string(argv[1]) == "--demo");
 
@@ -104,6 +108,9 @@ int main(int argc, char* argv[]) {
     World world;
     Player player;
     TimeSystem time_system;
+    // Seeded per run and round-tripped through the save file, so a reloaded
+    // game continues the same random sequence.
+    Rng rng;
 
     bool running = true;
     bool game_started = false;
@@ -186,8 +193,8 @@ int main(int argc, char* argv[]) {
     // ── New game initialization ────────────────────────────────────
     auto start_new_game = [&]() {
         // Demo mode uses a fixed seed so screenshots are reproducible
-        map_seed = demo_mode ? 20260801u
-                             : static_cast<uint32_t>(std::time(nullptr)) + static_cast<uint32_t>(std::rand());
+        map_seed = demo_mode ? 20260801u : static_cast<uint32_t>(std::time(nullptr));
+        rng.seed(0x9E3779B97F4A7C15ull ^ (static_cast<uint64_t>(map_seed) * 6364136223846793005ull));
         world = World();
         world.init(map_seed);
         world.set_load_radius(settings.load_radius);
@@ -257,85 +264,52 @@ int main(int argc, char* argv[]) {
             if (torch) player.add_item(*torch, 1);
         }
 
+        // Pick a free tile in a box around the player, or report failure.
+        auto find_open_tile = [&](int reach, int& out_x, int& out_y) {
+            for (int attempt = 0; attempt < 200; ++attempt) {
+                int tx = player.x() + rng.range(-reach, reach);
+                int ty = player.y() + rng.range(-reach, reach);
+                if (!world.is_passable(tx, ty)) continue;
+                if (world.has_npc_at(tx, ty) || world.has_enemy_at(tx, ty)) continue;
+                out_x = tx;
+                out_y = ty;
+                return true;
+            }
+            return false;
+        };
+
         // World items — spawn near player in loaded chunks
         {
-            const char* names[] = {"Gold Coin", "Health Potion", "Old Scroll", "Bread", "Rusty Key", "Apple"};
-            const uint32_t glyphs[] = {'$', '!', '?', '%', '!', '%'};
-            const uint8_t colors[][3] = {
-                {255, 215, 0}, {255, 50, 50}, {200, 180, 140}, {180, 140, 60}, {150, 150, 150}, {220, 60, 60}};
-            int num = 10 + std::rand() % 6;
+            const char* names[] = {"Gold Coin", "Health Potion", "Old Scroll",
+                                   "Bread", "Rusty Key", "Apple"};
+            int num = 10 + rng.below(6);
             for (int i = 0; i < num; ++i) {
                 int ix, iy;
-                int attempts = 0;
-                do {
-                    ix = player.x() - 30 + std::rand() % 60;
-                    iy = player.y() - 30 + std::rand() % 60;
-                    attempts++;
-                } while (!world.is_passable(ix, iy) && attempts < 200);
-                if (attempts >= 200) continue;
-                int t = std::rand() % 6;
-                Entity e(ix, iy, glyphs[t], names[t], colors[t][0], colors[t][1], colors[t][2]);
+                if (!find_open_tile(30, ix, iy)) continue;
+                const Item* item = find_item(names[rng.below(6)]);
+                if (!item) continue;
+                Entity e(ix, iy, item->glyph(), item->name(),
+                         item->fg_r(), item->fg_g(), item->fg_b());
                 e.set_is_item(true);
                 world.spawn_item(std::move(e));
             }
         }
 
-        // NPCs — spawn near player in loaded chunks
-        {
-            std::vector<std::pair<Item, int>> merchant_stock;
-            {
-                auto add = [&](const char* name, int qty) {
-                    const Item* it = find_item(name);
-                    if (it) merchant_stock.emplace_back(*it, qty);
-                };
-                add("Bread", 10); add("Health Potion", 5); add("Water Skin", 5);
-                add("Iron Sword", 3); add("Iron Shield", 2); add("Leather Armor", 2);
-                add("Wooden Shield", 4); add("Hood", 3); add("Leather Boots", 3); add("Gold Ring", 1);
-            }
-
-            struct NpcDef {
-                uint32_t glyph; const char* name; uint8_t r, g, b;
-                bool merchant; int affinity;
-                std::vector<DialogueNode> (*dialogue_fn)();
-                std::vector<std::pair<Item, int>> shop;
-            };
-            NpcDef defs[] = {
-                {'a', "Old Sage", 180, 160, 220, false, 40, build_sage_dialogue, {}},
-                {'v', "Villager", 140, 200, 140, false, 30, build_villager_dialogue, {}},
-                {'m', "Merchant", 220, 180, 60, true, 60, build_merchant_dialogue, merchant_stock},
-                {'a', "Wanderer", 100, 160, 200, false, 20, build_wanderer_dialogue, {}},
-                {'v', "Child", 200, 200, 120, false, 50, build_child_dialogue, {}},
-            };
-            for (const auto& def : defs) {
-                int nx, ny;
-                int attempts = 0;
-                do {
-                    nx = player.x() - 20 + std::rand() % 40;
-                    ny = player.y() - 20 + std::rand() % 40;
-                    attempts++;
-                } while (!world.is_passable(nx, ny) && attempts < 200);
-                if (attempts >= 200) continue;
-                world.spawn_npc(Npc(nx, ny, def.glyph, def.name, def.r, def.g, def.b,
-                                    def.merchant, def.affinity, def.dialogue_fn(), def.shop));
-            }
+        // Wandering NPCs near the player. The origin village supplies the six
+        // settlement NPCs (see make_npc / village_npc_names), so spawning them
+        // here too would duplicate the merchant and villagers.
+        for (const char* name : {"Old Sage", "Wanderer", "Child"}) {
+            int nx, ny;
+            if (!find_open_tile(20, nx, ny)) continue;
+            world.spawn_npc(make_npc(name, nx, ny));
         }
 
-        // Enemies — spawn near player in loaded chunks
-        {
-            const char* names[] = {"Rat", "Rat", "Goblin", "Goblin", "Spider", "Bat"};
-            for (const char* name : names) {
-                int ex, ey;
-                int attempts = 0;
-                do {
-                    ex = player.x() - 25 + std::rand() % 50;
-                    ey = player.y() - 25 + std::rand() % 50;
-                    attempts++;
-                } while (!world.is_passable(ex, ey) && attempts < 200);
-                if (attempts >= 200) continue;
-                // Don't spawn too close to player
-                if (std::abs(ex - player.x()) + std::abs(ey - player.y()) < 15) continue;
-                world.spawn_enemy(make_enemy(name, ex, ey));
-            }
+        // Enemies — spawn near player, but not right on top of them
+        for (const char* name : {"Rat", "Rat", "Goblin", "Goblin", "Spider", "Bat"}) {
+            int ex, ey;
+            if (!find_open_tile(25, ex, ey)) continue;
+            if (std::abs(ex - player.x()) + std::abs(ey - player.y()) < 15) continue;
+            world.spawn_enemy(make_enemy(name, ex, ey));
         }
 
         // Reset UI/run state
@@ -420,6 +394,11 @@ int main(int argc, char* argv[]) {
 
         while (SDL_PollEvent(&event)) {
             if (event.type == SDL_QUIT) { running = false; break; }
+            if (event.type == SDL_WINDOWEVENT &&
+                event.window.event == SDL_WINDOWEVENT_SIZE_CHANGED) {
+                window.on_resized(event.window.data1, event.window.data2);
+                continue;
+            }
             if (event.type != SDL_KEYDOWN) continue;
             SDL_Keycode key = event.key.keysym.sym;
 
@@ -504,7 +483,9 @@ int main(int argc, char* argv[]) {
                 if (key == SDLK_UP && pause_cursor > 0) pause_cursor--;
                 if (key == SDLK_DOWN && pause_cursor < max_slot) pause_cursor++;
                 if (key == SDLK_RETURN || key == SDLK_SPACE) {
-                    GameState state = capture_state(player, world, map_seed, play_time_seconds, time_system);
+                    GameState state = capture_state(player, world, map_seed,
+                                                    play_time_seconds, time_system,
+                                                    rng.state());
                     if (save_game(pause_cursor, state)) {
                         log_msg("Game saved to slot " + std::to_string(pause_cursor + 1));
                     } else {
@@ -536,41 +517,34 @@ int main(int argc, char* argv[]) {
                         world.set_render_radius(settings.render_radius);
                         world.set_simulation_radius(settings.sim_radius);
 
-                        // Restore player
+                        rng.set_state(state.rng_state);
+
+                        // Restore player. Stats and equipment go in before HP
+                        // so max_hp is final when the saved HP is clamped.
                         player = Player();
                         player.spawn(state.player_x, state.player_y);
                         player.stats() = state.stats;
-                        int hp_target = state.hp;
-                        int hp_max = player.max_hp();
-                        if (hp_target < hp_max) {
-                            player.take_damage(hp_max - hp_target);
-                        }
                         player.set_xp(state.xp);
                         player.set_level(state.level);
                         player.set_gold(state.gold);
 
-                        // Restore inventory
                         for (const auto& [item, qty] : state.inventory) {
                             player.add_item(item, qty);
                         }
-
-                        // Restore equipment
                         for (const auto& [slot, item] : state.equipment) {
                             player.equip_to_slot(slot, item);
                         }
+                        player.set_hp(state.hp);
 
-                        // Load chunks around player (regenerates terrain + structures from seed)
-                        world.update_loaded_chunks(player.x(), player.y());
-
-                        // Clear auto-spawned entities before restoring saved ones
-                        world.clear_all_entities();
-
-                        // Restore chunk data (terrain, explored tiles, modifications, placed objects, entities)
-                        apply_chunk_data(world, state.chunks);
-
-                        // Restore zones
                         world.clear_zones();
                         for (const auto& z : state.zones) world.add_zone(z);
+
+                        // Stage saved terrain deltas and entities before any
+                        // chunk is generated, so loading a chunk replays the
+                        // save instead of spawning a fresh population that
+                        // then has to be cleared.
+                        apply_chunk_data(world, state.chunks);
+                        world.update_loaded_chunks(player.x(), player.y());
 
                         // Reset UI state
                         turn_counter = 0;
@@ -620,11 +594,17 @@ int main(int argc, char* argv[]) {
                             dialogue_node = opt.next_node;
                             dialogue_option = 0;
                             break;
+                        // DESIGN.md affinity thresholds: gifts need > Wary,
+                        // trade needs > Friendly on top of being a merchant.
                         case DialogueAction::Trade:
-                            if (npc.is_merchant()) trade_open(trade_state, &npc);
+                            if (npc.can_trade()) {
+                                trade_open(trade_state, &npc);
+                            } else if (npc.is_merchant()) {
+                                log_msg(npc.name() + " doesn't trust you enough to trade.");
+                            }
                             break;
                         case DialogueAction::Gift:
-                            if (npc.can_gift() || npc.is_merchant()) {
+                            if (npc.can_gift()) {
                                 gift_cursor = 0;
                                 gift_return = GameMode::Dialogue;
                                 mode = GameMode::GiftSelect;
@@ -662,7 +642,7 @@ int main(int argc, char* argv[]) {
                         log_msg("No one nearby to gift to.");
                         mode = GameMode::Normal;
                     } else {
-                        const Item& item = player.inventory_item(gift_cursor);
+                        Item item = player.inventory_item(gift_cursor);
                         GiftReaction reaction = target_npc->react_to_gift(item);
                         int aff_change = 0;
                         switch (reaction) {
@@ -823,7 +803,10 @@ int main(int argc, char* argv[]) {
                 }
 
                 if (mode == GameMode::InventoryAction) {
-                    const Item& item = player.inventory_item(inv_cursor);
+                    // A copy, not a reference: equipping, dropping and using
+                    // all remove the stack from the inventory, and the item is
+                    // still read for the status message afterwards.
+                    Item item = player.inventory_item(inv_cursor);
                     int max_actions = 0;
                     std::vector<int> actions;
                     if (item.is_usable()) { actions.push_back(0); max_actions++; }
@@ -1038,14 +1021,19 @@ int main(int argc, char* argv[]) {
                         const int dirs[][2] = {{0,-1},{0,1},{-1,0},{1,0}};
                         for (auto [ddx, ddy] : dirs) {
                             Npc* n = world.npc_at(player.x() + ddx, player.y() + ddy);
-                            if (n) {
-                                dialogue_npc_x = n->x();
-                                dialogue_npc_y = n->y();
-                                dialogue_node = 0;
-                                dialogue_option = 0;
-                                mode = GameMode::Dialogue;
+                            if (!n) continue;
+                            // DESIGN.md: hostile NPCs (affinity <= 20) refuse
+                            // to talk at all.
+                            if (!n->can_talk()) {
+                                log_msg(n->name() + " turns away from you.");
                                 break;
                             }
+                            dialogue_npc_x = n->x();
+                            dialogue_npc_y = n->y();
+                            dialogue_node = 0;
+                            dialogue_option = 0;
+                            mode = GameMode::Dialogue;
+                            break;
                         }
                         break;
                     }
@@ -1062,27 +1050,32 @@ int main(int argc, char* argv[]) {
                         bool fought = false;
                         Enemy* target = world.enemy_at(nx, ny);
                         if (target) {
-                            // Player attacks enemy
-                            int atk_var = player.total_damage_variance();
-                            int raw_atk = player.total_attack() + (atk_var > 0 ? std::rand() % (2 * atk_var + 1) - atk_var : 0);
-                            int dmg = raw_atk - target->defense();
-                            if (dmg < 1) dmg = 1;
+                            int raw_atk = player.total_attack() +
+                                          rng.variance(player.total_damage_variance());
+                            int dmg = std::max(1, raw_atk - target->defense());
                             target->take_damage(dmg);
-                            std::string combat_msg = "You hit " + target->name() + " for " + std::to_string(dmg) + " damage!";
+                            std::string combat_msg = "You hit " + target->name() +
+                                                     " for " + std::to_string(dmg) + " damage!";
                             fought = true;
 
-                            if (target->check_death()) {
-                                combat_msg += " " + target->name() + " killed! +" + std::to_string(target->xp_value()) + " XP";
+                            if (!target->is_alive()) {
+                                combat_msg += " " + target->name() + " killed! +" +
+                                              std::to_string(target->xp_value()) + " XP";
                                 player.add_xp(target->xp_value());
-                                // Drop items on the ground
+                                // Read everything off the enemy before the
+                                // spawn/remove calls invalidate the pointer.
                                 int drop_x = target->x(), drop_y = target->y();
-                                for (const auto& [item, qty] : target->drops()) {
-                                    Entity e(drop_x, drop_y, item.glyph(), item.name(),
-                                             item.fg_r(), item.fg_g(), item.fg_b());
-                                    e.set_is_item(true);
-                                    world.spawn_item(std::move(e));
-                                }
+                                auto drops = target->drops();
                                 world.remove_enemy_at(nx, ny);
+                                target = nullptr;
+                                for (const auto& [item, qty] : drops) {
+                                    for (int n = 0; n < qty; ++n) {
+                                        Entity e(drop_x, drop_y, item.glyph(), item.name(),
+                                                 item.fg_r(), item.fg_g(), item.fg_b());
+                                        e.set_is_item(true);
+                                        world.spawn_item(std::move(e));
+                                    }
+                                }
                             }
                             log_msg(combat_msg, 60);
                         }
@@ -1112,7 +1105,7 @@ int main(int argc, char* argv[]) {
                             const Item* stone = find_item("Stone");
                             if (stone) player.add_item(*stone, yield);
                             std::string m = "You mine the rock face. +" + std::to_string(yield) + " Stone";
-                            if (std::rand() % 100 < ore_chance) {
+                            if (rng.percent(ore_chance)) {
                                 const Item* ore = find_item("Iron Ore");
                                 if (ore) { player.add_item(*ore, 1); m += ", +1 Iron Ore"; }
                             }
@@ -1182,10 +1175,10 @@ int main(int argc, char* argv[]) {
             int torch_r = player.has_light_source() ? player.torch_radius() : 0;
             light::compute(world, player.x(), player.y(), ambient, torch_r);
 
-            // FOV radius scales with ambient light: full radius at day, shrinks at dusk/night
-            int perception = player.stats().perception();
-            int base_radius = perception * 2;
-            if (base_radius < 6) base_radius = 6;
+            // PLAN.md 4B: base radius 8, WIS bonus (wis - 10) / 2, then scaled
+            // by ambient light so sight shrinks at dusk and night.
+            int base_radius = FOV_BASE_RADIUS + (player.stats().perception() - 10) / 2;
+            base_radius = std::max(3, base_radius);
             float light_frac = ambient / 15.0f;
             int fov_radius = static_cast<int>(base_radius * light_frac);
             // Always see at least torch range + 2, or minimum 4
@@ -1198,58 +1191,13 @@ int main(int argc, char* argv[]) {
 
         if (player_took_turn) {
             turn_counter++;
-            time_system.advance();
-            // Enemy turns — collect pointers first since enemies may die
-            auto all_enemies = world.get_all_enemies();
-            for (auto* ep : all_enemies) {
-                if (!ep->is_alive()) continue;
-                ep->update(world, player.x(), player.y());
-
-                // Enemy attacks if adjacent and chasing
-                int dist_after = std::abs(ep->x() - player.x()) + std::abs(ep->y() - player.y());
-                if (dist_after <= 1 && ep->is_alive()) {
-                    int e_var = ep->damage_variance();
-                    int raw_e_atk = ep->attack() + (e_var > 0 ? std::rand() % (2 * e_var + 1) - e_var : 0);
-                    // Night predators hit harder after dark
-                    if (ep->night_predator() && time_system.is_night()) raw_e_atk += 2;
-                    int actual = player.calc_damage(raw_e_atk);
-                    player.take_damage(raw_e_atk);
-                    std::string combat_msg = ep->name() + " hits you for " + std::to_string(actual) + " damage!";
-
-                    // Player counter-attacks
-                    int c_var = player.total_damage_variance();
-                    int raw_c_atk = player.total_attack() + (c_var > 0 ? std::rand() % (2 * c_var + 1) - c_var : 0);
-                    int counter_dmg = raw_c_atk - ep->defense();
-                    if (counter_dmg < 1) counter_dmg = 1;
-                    ep->take_damage(counter_dmg);
-                    combat_msg += " You hit back for " + std::to_string(counter_dmg) + "!";
-
-                    if (ep->check_death()) {
-                        combat_msg += " " + ep->name() + " killed! +" + std::to_string(ep->xp_value()) + " XP";
-                        player.add_xp(ep->xp_value());
-                        for (const auto& [item, qty] : ep->drops()) {
-                            Entity de(ep->x(), ep->y(), item.glyph(), item.name(),
-                                     item.fg_r(), item.fg_g(), item.fg_b());
-                            de.set_is_item(true);
-                            world.spawn_item(std::move(de));
-                        }
-                        world.remove_enemy_at(ep->x(), ep->y());
-                    }
-                    log_msg(combat_msg);
-                }
-            }
-            // NPC turns
-            auto all_npcs = world.get_all_npcs();
-            for (auto* np : all_npcs) {
-                np->update(world, player.x(), player.y());
-            }
-            // Fix entities that crossed chunk boundaries during movement
-            world.rekey_entities();
-
-            // Check player death
-            if (player.is_dead()) {
-                mode = GameMode::Dead;
-            }
+            TurnOutcome outcome = resolve_turn(world, player, time_system, rng);
+            for (const auto& message : outcome.messages) log_msg(message);
+            if (outcome.player_died) mode = GameMode::Dead;
+            // Time advanced, so ambient light and every actor position may
+            // have changed. Recompute rather than relying on each action
+            // remembering to ask for it.
+            need_fov_update = true;
         }
 
         // Play time tracking
@@ -1280,15 +1228,23 @@ int main(int argc, char* argv[]) {
 
                 if (world.in_bounds(mx, my)) {
                     Tile tile = world.get_tile(mx, my);
+                    // PLAN.md 4B: visible tiles are shaded by light level, so
+                    // a lit room reads differently from one lit only by the
+                    // player's torch. Explored-but-unseen stays dim.
+                    float shade = 1.0f;
                     if (tile.visible) {
                         cell.glyph = tile_glyph(tile.type);
                         tile_color(tile.type, cell.fg_r, cell.fg_g, cell.fg_b);
+                        shade = light_shade(tile.light_level);
                     } else if (tile.explored) {
                         cell.glyph = tile_glyph(tile.type);
                         tile_color(tile.type, cell.fg_r, cell.fg_g, cell.fg_b);
-                        cell.fg_r = static_cast<uint8_t>(cell.fg_r * 0.3f);
-                        cell.fg_g = static_cast<uint8_t>(cell.fg_g * 0.3f);
-                        cell.fg_b = static_cast<uint8_t>(cell.fg_b * 0.3f);
+                        shade = 0.3f;
+                    }
+                    if (shade < 1.0f) {
+                        cell.fg_r = static_cast<uint8_t>(cell.fg_r * shade);
+                        cell.fg_g = static_cast<uint8_t>(cell.fg_g * shade);
+                        cell.fg_b = static_cast<uint8_t>(cell.fg_b * shade);
                     }
 
                     // Zone tint (subtle, always shown on seen tiles)
@@ -1305,25 +1261,24 @@ int main(int argc, char* argv[]) {
                     }
 
                     if (tile.visible) {
-                        // Placed objects (torches, campfires) sit on top of terrain
+                        // Occupants draw over terrain, in increasing priority:
+                        // placed object, ground item, NPC, enemy. Actors keep
+                        // their full colour so they stay readable in the dark.
                         const PlacedObject* po = world.placed_object_at(mx, my);
                         if (po) {
                             cell.glyph = po->glyph;
                             cell.fg_r = po->fg_r; cell.fg_g = po->fg_g; cell.fg_b = po->fg_b;
                         }
-                        // Check for items
                         Entity* item = world.item_at(mx, my);
                         if (item && !item->in_inventory()) {
                             cell.glyph = item->glyph();
                             cell.fg_r = item->fg_r(); cell.fg_g = item->fg_g(); cell.fg_b = item->fg_b();
                         }
-                        // Check for NPCs
                         Npc* npc = world.npc_at(mx, my);
                         if (npc) {
                             cell.glyph = npc->glyph();
                             cell.fg_r = npc->fg_r(); cell.fg_g = npc->fg_g(); cell.fg_b = npc->fg_b();
                         }
-                        // Check for enemies
                         Enemy* enemy = world.enemy_at(mx, my);
                         if (enemy) {
                             cell.glyph = enemy->glyph();
