@@ -8,7 +8,13 @@ Renderer::~Renderer() {
 }
 
 bool Renderer::init(SDL_Window* window, const std::string& font_path, int font_size) {
+    // A grid of glyphs is cheap to draw, so software rendering is perfectly
+    // playable. Fall back to it rather than refuse to start on machines with
+    // no usable GPU driver -- headless CI and remote sessions, mainly.
     renderer_ = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED);
+    if (!renderer_) {
+        renderer_ = SDL_CreateRenderer(window, -1, SDL_RENDERER_SOFTWARE);
+    }
     if (!renderer_) {
         std::cerr << "SDL_CreateRenderer failed: " << SDL_GetError() << "\n";
         return false;
