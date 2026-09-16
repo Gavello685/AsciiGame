@@ -19,4 +19,16 @@ std::filesystem::path user_data_dir();
 // Local wall-clock time as "YYYY-MM-DDTHH:MM:SS".
 std::string local_timestamp();
 
+// Path to a monospace TrueType font the renderer can load.
+//
+// Resolution order:
+//   1. ASCII_GAME_FONT environment variable
+//   2. any .ttf under assets/fonts, searched from the working directory and
+//      one and two levels up so the game runs from a build subdirectory
+//   3. the first readable entry in a per-platform list of system fonts
+//
+// Returns an empty path when nothing is found; the caller reports that rather
+// than handing an invalid path to SDL_ttf.
+std::filesystem::path find_monospace_font();
+
 }
