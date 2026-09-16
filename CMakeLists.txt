@@ -52,35 +52,51 @@ endif()
 target_compile_options(ascii_game_core PRIVATE ${ASCII_GAME_WARNINGS})
 
 # ── Game executable ───────────────────────────────────────────────────
+#
+# Only the executable needs SDL2. It is looked up without REQUIRED so the test
+# suite still configures and runs on a machine with no SDL2 and no display.
 
-find_package(PkgConfig REQUIRED)
-pkg_check_modules(SDL2 REQUIRED sdl2)
-pkg_check_modules(SDL2_TTF REQUIRED SDL2_ttf)
+find_package(PkgConfig)
+if(PkgConfig_FOUND)
+    pkg_check_modules(SDL2 sdl2)
+    pkg_check_modules(SDL2_TTF SDL2_ttf)
+endif()
 
-add_executable(ascii_game
-    src/main.cpp
-    src/engine/window.cpp
-    src/engine/renderer.cpp
-    src/game/trade.cpp
-)
+if(SDL2_FOUND AND SDL2_TTF_FOUND)
+    set(ASCII_GAME_HAVE_SDL2 TRUE)
+else()
+    set(ASCII_GAME_HAVE_SDL2 FALSE)
+    message(STATUS
+        "SDL2/SDL2_ttf not found: skipping the 'ascii_game' target. "
+        "The 'ascii_game_tests' target is unaffected.")
+endif()
 
-target_compile_options(ascii_game PRIVATE ${ASCII_GAME_WARNINGS})
+if(ASCII_GAME_HAVE_SDL2)
+    add_executable(ascii_game
+        src/main.cpp
+        src/engine/window.cpp
+        src/engine/renderer.cpp
+        src/game/trade.cpp
+    )
 
-target_include_directories(ascii_game PRIVATE
-    ${SDL2_INCLUDE_DIRS}
-    ${SDL2_TTF_INCLUDE_DIRS}
-)
+    target_compile_options(ascii_game PRIVATE ${ASCII_GAME_WARNINGS})
 
-target_link_directories(ascii_game PRIVATE
-    ${SDL2_LIBRARY_DIRS}
-    ${SDL2_TTF_LIBRARY_DIRS}
-)
+    target_include_directories(ascii_game PRIVATE
+        ${SDL2_INCLUDE_DIRS}
+        ${SDL2_TTF_INCLUDE_DIRS}
+    )
 
-target_link_libraries(ascii_game PRIVATE
-    ascii_game_core
-    ${SDL2_LIBRARIES}
-    ${SDL2_TTF_LIBRARIES}
-)
+    target_link_directories(ascii_game PRIVATE
+        ${SDL2_LIBRARY_DIRS}
+        ${SDL2_TTF_LIBRARY_DIRS}
+    )
+
+    target_link_libraries(ascii_game PRIVATE
+        ascii_game_core
+        ${SDL2_LIBRARIES}
+        ${SDL2_TTF_LIBRARIES}
+    )
+endif()
 
 # ── Tests ─────────────────────────────────────────────────────────────
 
@@ -109,7 +125,7 @@ endif()
 # Copy the full dependency closure next to the executable so it runs outside
 # MSYS2 (SDL2_ttf pulls in freetype/harfbuzz/glib and friends).
 # Adjust MSYS2_DLL_DIR if your MSYS2 lives elsewhere.
-if(WIN32)
+if(WIN32 AND ASCII_GAME_HAVE_SDL2)
     set(MSYS2_DLL_DIR "C:/msys64/mingw64/bin" CACHE PATH "Directory containing SDL2/MinGW runtime DLLs")
     set(GAME_DLLS
         SDL2.dll

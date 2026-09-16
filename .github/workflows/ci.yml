@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  # The game logic has no SDL dependency, so it builds and tests on a plain
+  # Linux runner with no window, font or display.
+  tests:
+    name: Tests (${{ matrix.compiler }}${{ matrix.sanitize && ' + sanitizers' || '' }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - compiler: g++
+            sanitize: false
+          - compiler: clang++
+            sanitize: false
+          - compiler: g++
+            sanitize: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: |
+          FLAGS=""
+          if [ "${{ matrix.sanitize }}" = "true" ]; then
+            FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer"
+          fi
+          cmake -B build -S . \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_CXX_COMPILER=${{ matrix.compiler }} \
+            -DCMAKE_CXX_FLAGS="$FLAGS" \
+            -DASCII_GAME_WERROR=ON \
+            -DASCII_GAME_BUILD_TESTS=ON
+
+      - name: Build tests
+        run: cmake --build build --target ascii_game_tests --parallel
+
+      - name: Run tests
+        env:
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+          ASAN_OPTIONS: detect_leaks=0
+        run: ./build/ascii_game_tests
+
+  # The full executable needs SDL2 and SDL2_ttf. Building it on Linux keeps the
+  # SDL-facing code honest even though the game targets Windows.
+  build-game:
+    name: Build game (SDL2)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install SDL2
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libsdl2-dev libsdl2-ttf-dev
+
+      - name: Configure
+        run: cmake -B build -S . -DCMAKE_BUILD_TYPE=Debug -DASCII_GAME_WERROR=ON
+
+      - name: Build
+        run: cmake --build build --parallel
