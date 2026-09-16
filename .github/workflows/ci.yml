@@ -57,10 +57,24 @@ jobs:
       - name: Install SDL2
         run: |
           sudo apt-get update
-          sudo apt-get install -y libsdl2-dev libsdl2-ttf-dev
+          sudo apt-get install -y libsdl2-dev libsdl2-ttf-dev fonts-dejavu-core
 
       - name: Configure
         run: cmake -B build -S . -DCMAKE_BUILD_TYPE=Debug -DASCII_GAME_WERROR=ON
 
       - name: Build
         run: cmake --build build --parallel
+
+      # Boot the real binary and walk the scripted demo through every overlay.
+      # Catches startup failures and drawing crashes that the SDL-free test
+      # suite cannot reach. The dummy video driver needs no display, and the
+      # renderer falls back to software when there is no GPU.
+      - name: Smoke test (headless)
+        env:
+          SDL_VIDEODRIVER: dummy
+        run: |
+          mkdir -p smoke && cd smoke
+          ASCII_GAME_DATA_DIR="$PWD/data" ../build/ascii_game --demo
+          # The demo writes one screenshot per overlay; no files means it
+          # exited early without reporting a failure.
+          test "$(ls -1 *.bmp | wc -l)" -eq 8
