@@ -48,41 +48,48 @@ bool trade_handle_input(TradeState& state, SDL_Keycode key,
             state.confirm_cursor = 1 - state.confirm_cursor;
         } else if (key == SDLK_RETURN || key == SDLK_SPACE) {
             if (state.confirm_cursor == 0) {
-                // Confirm action
+                // Both branches copy the Item before mutating its container:
+                // remove_item and buy_from_shop erase the stack when it
+                // empties, which would leave a reference dangling.
                 if (state.selling) {
-                    // Sell from player to merchant
                     int idx = state.player_cursor;
                     if (idx >= 0 && idx < static_cast<int>(player.inventory().size())) {
-                        const Item& item = player.inventory_item(idx);
+                        Item item = player.inventory_item(idx);
                         int price = sell_price(item);
                         player.remove_item(idx, 1);
                         merchant.sell_to_shop(item, 1);
                         player.add_gold(price);
-                        state.message = "Sold for " + std::to_string(price) + " gold.";
+                        state.message = "Sold " + item.name() + " for " +
+                                        std::to_string(price) + " gold.";
                         state.message_timer = 90;
                     }
                 } else {
-                    // Buy from merchant to player
                     int idx = state.shop_cursor;
                     if (idx >= 0 && idx < static_cast<int>(merchant.shop_inventory().size())) {
-                        const auto& [item, stock] = merchant.shop_inventory()[idx];
+                        Item item = merchant.shop_item_at(idx);
                         int price = buy_price(item);
                         if (!player.can_carry(item.weight())) {
                             state.message = "Too heavy!";
-                            state.message_timer = 90;
                         } else if (!player.spend_gold(price)) {
                             state.message = "Not enough gold!";
-                            state.message_timer = 90;
                         } else {
                             merchant.buy_from_shop(idx, 1);
                             player.add_item(item, 1);
-                            state.message = "Bought " + item.name() + " for " + std::to_string(price) + " gold.";
-                            state.message_timer = 90;
+                            state.message = "Bought " + item.name() + " for " +
+                                            std::to_string(price) + " gold.";
                         }
+                        state.message_timer = 90;
                     }
                 }
             }
             state.confirming = false;
+
+            // A stack that emptied shrinks its list, so pull the cursors back
+            // into range.
+            int player_last = static_cast<int>(player.inventory().size()) - 1;
+            int shop_last = static_cast<int>(merchant.shop_inventory().size()) - 1;
+            state.player_cursor = std::max(0, std::min(state.player_cursor, player_last));
+            state.shop_cursor = std::max(0, std::min(state.shop_cursor, shop_last));
         } else if (key == SDLK_ESCAPE) {
             state.confirming = false;
         }

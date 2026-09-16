@@ -40,6 +40,14 @@ public:
     bool is_full_hp() const { return hp_ >= max_hp(); }
     int hp() const { return hp_; }
     int max_hp() const { return stats_.max_hp(); }
+
+    // Restore HP directly, clamped to [0, max_hp]. Used on load: routing the
+    // saved value through take_damage() applied armour reduction and so
+    // resurrected the player with more HP than they saved with.
+    void set_hp(int v) {
+        hp_ = v < 0 ? 0 : (v > max_hp() ? max_hp() : v);
+    }
+
     void take_damage(int damage) {
         int actual = damage - total_defense() / 2;
         if (actual < 1) actual = 1;

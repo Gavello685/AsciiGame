@@ -1,7 +1,8 @@
 #include "game/npc.h"
+#include "game/rng.h"
 #include "game/world.h"
-#include <cstdlib>
 #include <algorithm>
+#include <utility>
 
 Npc::Npc(int x, int y, uint32_t glyph, const std::string& name,
          uint8_t fg_r, uint8_t fg_g, uint8_t fg_b,
@@ -14,10 +15,101 @@ Npc::Npc(int x, int y, uint32_t glyph, const std::string& name,
       dialogue_tree_(dialogue_tree), shop_inventory_(shop_inventory) {
 }
 
+void Npc::set_affinity(int v) {
+    affinity_ = std::max(0, std::min(100, v));
+}
+
 void Npc::adjust_affinity(int delta) {
-    affinity_ += delta;
-    if (affinity_ < 0) affinity_ = 0;
-    if (affinity_ > 100) affinity_ = 100;
+    set_affinity(affinity_ + delta);
+}
+
+const char* Npc::affinity_label() const {
+    if (affinity_ <= HOSTILE_MAX) return "Hostile";
+    if (affinity_ <= WARY_MAX) return "Wary";
+    if (affinity_ <= FRIENDLY_MAX) return "Friendly";
+    if (affinity_ <= TRUSTING_MAX) return "Trusting";
+    return "Devoted";
+}
+
+// ── NPC archetype database ────────────────────────────────────────
+
+namespace {
+
+struct NpcArchetype {
+    const char* name;
+    uint32_t glyph;
+    uint8_t r, g, b;
+    bool is_merchant;
+    int affinity;
+    std::vector<DialogueNode> (*dialogue)();
+    std::vector<std::pair<const char*, int>> stock;
+};
+
+const std::vector<NpcArchetype>& npc_archetypes() {
+    static const std::vector<NpcArchetype> archetypes = {
+        { "Merchant", 'm', 220, 180,  60, true,  60, build_merchant_dialogue,
+          {{"Bread", 10}, {"Health Potion", 5}, {"Water Skin", 5}, {"Iron Sword", 3},
+           {"Leather Armor", 2}, {"Wooden Shield", 3}, {"Hood", 3},
+           {"Leather Boots", 3}, {"Torch", 4}} },
+
+        { "Blacksmith", 'b', 220, 120,  60, true,  50, build_blacksmith_dialogue,
+          {{"Iron Sword", 3}, {"Steel Sword", 1}, {"Spear", 3}, {"Battle Axe", 1},
+           {"Iron Shield", 2}, {"Steel Shield", 1}, {"Chain Mail", 1},
+           {"Steel Helm", 1}, {"Gauntlets", 2}, {"Woodcutter's Axe", 2},
+           {"Pickaxe", 2}, {"Iron Rod", 5}} },
+
+        { "Herbalist", 'h', 180, 120, 200, true,  50, build_herbalist_dialogue,
+          {{"Health Potion", 8}, {"Greater Health Potion", 2}, {"Water Skin", 6},
+           {"Bread", 6}, {"Apple", 8}, {"Cheese", 4}, {"Cooked Meat", 3}} },
+
+        { "Villager",  'v', 140, 200, 140, false, 30, build_villager_dialogue, {} },
+        { "Guard",     'g', 100, 140, 220, false, 40, build_guard_dialogue,    {} },
+        { "Farmer",    'f', 100, 180,  80, false, 40, build_farmer_dialogue,   {} },
+        { "Old Sage",  'a', 180, 160, 220, false, 40, build_sage_dialogue,     {} },
+        { "Wanderer",  'a', 100, 160, 200, false, 20, build_wanderer_dialogue, {} },
+        { "Child",     'v', 200, 200, 120, false, 50, build_child_dialogue,    {} },
+    };
+    return archetypes;
+}
+
+const NpcArchetype& archetype_for(const std::string& name) {
+    const auto& all = npc_archetypes();
+    for (const auto& a : all) {
+        if (name == a.name) return a;
+    }
+    // Villager is the fallback for unknown names.
+    for (const auto& a : all) {
+        if (std::string("Villager") == a.name) return a;
+    }
+    return all.front();
+}
+
+}
+
+Npc make_npc(const std::string& name, int x, int y) {
+    const NpcArchetype& a = archetype_for(name);
+
+    std::vector<std::pair<Item, int>> shop;
+    shop.reserve(a.stock.size());
+    for (const auto& [item_name, qty] : a.stock) {
+        if (const Item* item = find_item(item_name)) shop.emplace_back(*item, qty);
+    }
+
+    return Npc(x, y, a.glyph, a.name, a.r, a.g, a.b,
+               a.is_merchant, a.affinity, a.dialogue(), shop);
+}
+
+const std::vector<std::string>& village_npc_names() {
+    // DESIGN.md: villages spawn all six settlement NPCs.
+    static const std::vector<std::string> names = {
+        "Villager", "Merchant", "Guard", "Blacksmith", "Farmer", "Herbalist"
+    };
+    return names;
+}
+
+Item Npc::shop_item_at(int index) const {
+    if (index < 0 || index >= static_cast<int>(shop_inventory_.size())) return Item();
+    return shop_inventory_[index].first;
 }
 
 bool Npc::buy_from_shop(int index, int count) {
@@ -146,30 +238,34 @@ bool Npc::can_move_to(int x, int y, const World& world) const {
     return true;
 }
 
-void Npc::update(World& world, int player_x, int player_y) {
+void Npc::update(World& world, int player_x, int player_y, Rng& rng) {
     (void)player_x;
     (void)player_y;
 
     switch (state_) {
         case NpcState::Idle:
             idle_timer_++;
-            if (idle_timer_ > 30 + std::rand() % 40) {
+            if (idle_timer_ > 30 + rng.below(40)) {
                 state_ = NpcState::Wandering;
-                wander_timer_ = 10 + std::rand() % 20;
-                const int dirs[][2] = {{0,1},{0,-1},{1,0},{-1,0}};
-                int d = std::rand() % 4;
-                wander_dx_ = dirs[d][0];
-                wander_dy_ = dirs[d][1];
+                wander_timer_ = 10 + rng.below(20);
+                pick_wander_direction(rng);
             }
             break;
 
         case NpcState::Wandering:
-            wander(world);
+            wander(world, rng);
             break;
     }
 }
 
-void Npc::wander(World& world) {
+void Npc::pick_wander_direction(Rng& rng) {
+    const int dirs[][2] = {{0,1},{0,-1},{1,0},{-1,0}};
+    int d = rng.below(4);
+    wander_dx_ = dirs[d][0];
+    wander_dy_ = dirs[d][1];
+}
+
+void Npc::wander(World& world, Rng& rng) {
     wander_timer_--;
     if (wander_timer_ <= 0) {
         state_ = NpcState::Idle;
@@ -184,9 +280,6 @@ void Npc::wander(World& world) {
         x_ = nx;
         y_ = ny;
     } else {
-        const int dirs[][2] = {{0,1},{0,-1},{1,0},{-1,0}};
-        int d = std::rand() % 4;
-        wander_dx_ = dirs[d][0];
-        wander_dy_ = dirs[d][1];
+        pick_wander_direction(rng);
     }
 }
