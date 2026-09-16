@@ -122,6 +122,8 @@ if(ASCII_GAME_BUILD_TESTS)
         tests/test_world_settings.cpp
         tests/test_turn.cpp
         tests/test_rng.cpp
+        tests/test_session.cpp
+        tests/test_input.cpp
     )
     target_compile_options(ascii_game_tests PRIVATE ${ASCII_GAME_WARNINGS})
     target_include_directories(ascii_game_tests PRIVATE ${CMAKE_SOURCE_DIR}/tests)
