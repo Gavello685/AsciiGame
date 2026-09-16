@@ -68,39 +68,39 @@ static const StructureDef structure_defs[] = {
     {
         "Village", 13, 11, village_tiles,
         {
-            {'V', "npc", "Villager"},
-            {'M', "npc", "Merchant"},
-            {'G', "npc", "Guard"},
-            {'B', "npc", "Blacksmith"},
-            {'F', "npc", "Farmer"},
-            {'H', "npc", "Herbalist"},
+            {StructureEntityKind::Npc, "Villager"},
+            {StructureEntityKind::Npc, "Merchant"},
+            {StructureEntityKind::Npc, "Guard"},
+            {StructureEntityKind::Npc, "Blacksmith"},
+            {StructureEntityKind::Npc, "Farmer"},
+            {StructureEntityKind::Npc, "Herbalist"},
         }
     },
     // Cave
     {
         "Cave", 13, 10, cave_tiles,
         {
-            {'G', "enemy", "Goblin"},
-            {'R', "enemy", "Rat"},
-            {'B', "enemy", "Bat"},
+            {StructureEntityKind::Enemy, "Goblin"},
+            {StructureEntityKind::Enemy, "Rat"},
+            {StructureEntityKind::Enemy, "Bat"},
         }
     },
     // Ruins
     {
         "Ruins", 9, 10, ruins_tiles,
         {
-            {'S', "enemy", "Spider"},
-            {'Z', "enemy", "Zombie"},
+            {StructureEntityKind::Enemy, "Spider"},
+            {StructureEntityKind::Enemy, "Zombie"},
         }
     },
     // Dungeon
     {
         "Dungeon", 11, 12, dungeon_tiles,
         {
-            {'G', "enemy", "Goblin"},
-            {'O', "enemy", "Ogre"},
-            {'T', "enemy", "Giant Spider"},
-            {'Z', "enemy", "Zombie"},
+            {StructureEntityKind::Enemy, "Goblin"},
+            {StructureEntityKind::Enemy, "Ogre"},
+            {StructureEntityKind::Enemy, "Giant Spider"},
+            {StructureEntityKind::Enemy, "Zombie"},
         }
     },
 };
@@ -135,10 +135,9 @@ void stamp_structure(Chunk& chunk, int origin_lx, int origin_ly, StructureType t
                 case ' ': continue;  // Skip empty
                 default:  continue;
             }
-            chunk.set(lx, ly, t);
+            chunk.set_generated(lx, ly, t);
         }
     }
-    chunk.mark_dirty();
 }
 
 // Uniform deterministic hash of (cx, cy, seed) -> [0, 1).
@@ -187,10 +186,34 @@ StructureType decide_structure(int cx, int cy, BiomeType biome, uint32_t seed) {
     }
 }
 
-bool try_place_structure(Chunk& chunk, int cx, int cy, uint32_t seed) {
+// Wall torches sit on the 'T' cells of a template. They are seed-derived, so
+// they are re-added on every generation and never persisted.
+static void place_template_torches(Chunk& chunk, int origin_lx, int origin_ly,
+                                   const StructureDef& def) {
+    for (int y = 0; y < def.height; ++y) {
+        for (int x = 0; x < def.width; ++x) {
+            if (def.tiles[y][x] != 'T') continue;
+            int lx = origin_lx + x;
+            int ly = origin_ly + y;
+            if (!chunk.in_bounds(lx, ly)) continue;
+
+            PlacedObject torch;
+            torch.local_x = lx;
+            torch.local_y = ly;
+            torch.glyph = '*';
+            torch.name = "Wall Torch";
+            torch.fg_r = 255; torch.fg_g = 200; torch.fg_b = 50;
+            torch.is_light = true;
+            torch.light_radius = 5;
+            chunk.add_placed_object(torch);
+        }
+    }
+}
+
+StructureType try_place_structure(Chunk& chunk, int cx, int cy, uint32_t seed) {
     BiomeType biome = static_cast<BiomeType>(chunk.biome_id());
     StructureType stype = decide_structure(cx, cy, biome, seed);
-    if (stype == StructureType::None) return false;
+    if (stype == StructureType::None) return StructureType::None;
 
     const StructureDef& def = structure_def(stype);
 
@@ -215,33 +238,13 @@ bool try_place_structure(Chunk& chunk, int cx, int cy, uint32_t seed) {
     if (origin_ly + def.height > CHUNK_SIZE) origin_ly = CHUNK_SIZE - def.height;
 
     stamp_structure(chunk, origin_lx, origin_ly, stype);
+    chunk.set_structure_id(static_cast<int>(stype));
+    place_template_torches(chunk, origin_lx, origin_ly, def);
 
-    // Place torches where 'T' tiles are
-    for (int y = 0; y < def.height; ++y) {
-        for (int x = 0; x < def.width; ++x) {
-            if (def.tiles[y][x] == 'T') {
-                int lx = origin_lx + x;
-                int ly = origin_ly + y;
-                if (chunk.in_bounds(lx, ly)) {
-                    PlacedObject torch;
-                    torch.local_x = lx;
-                    torch.local_y = ly;
-                    torch.glyph = '*';
-                    torch.name = "Wall Torch";
-                    torch.fg_r = 255; torch.fg_g = 200; torch.fg_b = 50;
-                    torch.is_light = true;
-                    torch.light_radius = 5;
-                    chunk.add_placed_object(torch);
-                }
-            }
-        }
-    }
-
-    return true;
+    return stype;
 }
 
-void force_place_structure(Chunk& chunk, int cx, int cy, StructureType type) {
-    (void)cx; (void)cy;
+void force_place_structure(Chunk& chunk, StructureType type) {
     const StructureDef& def = structure_def(type);
 
     // Center the structure in the chunk
@@ -266,29 +269,10 @@ void force_place_structure(Chunk& chunk, int cx, int cy, StructureType type) {
             // Only clear tiles that block movement (trees, mountains, etc.)
             // Don't overwrite structure tiles or already-passable terrain
             if (tile_blocks_movement(t.type) && t.type != TileType::Wall_Dungeon) {
-                chunk.set(lx, ly, TileType::Grass);
+                chunk.set_generated(lx, ly, TileType::Grass);
             }
         }
     }
 
-    // Place torches where 'T' tiles are
-    for (int y = 0; y < def.height; ++y) {
-        for (int x = 0; x < def.width; ++x) {
-            if (def.tiles[y][x] == 'T') {
-                int lx = origin_lx + x;
-                int ly = origin_ly + y;
-                if (chunk.in_bounds(lx, ly)) {
-                    PlacedObject torch;
-                    torch.local_x = lx;
-                    torch.local_y = ly;
-                    torch.glyph = '*';
-                    torch.name = "Wall Torch";
-                    torch.fg_r = 255; torch.fg_g = 200; torch.fg_b = 50;
-                    torch.is_light = true;
-                    torch.light_radius = 5;
-                    chunk.add_placed_object(torch);
-                }
-            }
-        }
-    }
+    place_template_torches(chunk, origin_lx, origin_ly, def);
 }
