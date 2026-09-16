@@ -1,6 +1,6 @@
 #include "game/enemy.h"
+#include "game/rng.h"
 #include "game/world.h"
-#include <cstdlib>
 #include <algorithm>
 #include <cmath>
 #include <queue>
@@ -22,8 +22,8 @@ void Enemy::take_damage(int damage) {
     if (hp_ < 0) hp_ = 0;
 }
 
-bool Enemy::check_death() {
-    return hp_ <= 0;
+void Enemy::set_hp(int v) {
+    hp_ = std::max(0, std::min(max_hp_, v));
 }
 
 bool Enemy::night_predator() const {
@@ -68,17 +68,13 @@ Enemy make_enemy(const std::string& name, int x, int y) {
     return Enemy(x, y, 'r', "Rat", 160, 120, 80, 5, 5, 2, 0, 3, 0, drop_list("Bread", 1));
 }
 
-void Enemy::assign_default_drops() {
-    drops_ = make_enemy(name_, x_, y_).drops();
-}
-
 bool Enemy::can_move_to(int x, int y, const World& world) const {
     if (!world.is_passable(x, y)) return false;
     if (world.has_enemy_at(x, y)) return false;
     return true;
 }
 
-void Enemy::update(World& world, int player_x, int player_y) {
+void Enemy::update(World& world, int player_x, int player_y, Rng& rng) {
     int dist = std::abs(x_ - player_x) + std::abs(y_ - player_y);
 
     // Chase if player is within detection range (8 tiles, requires visibility)
@@ -95,13 +91,10 @@ void Enemy::update(World& world, int player_x, int player_y) {
     switch (state_) {
         case EnemyState::Idle:
             idle_timer_++;
-            if (idle_timer_ > 20 + std::rand() % 30) {
+            if (idle_timer_ > 20 + rng.below(30)) {
                 state_ = EnemyState::Wandering;
-                wander_timer_ = 5 + std::rand() % 10;
-                const int dirs[][2] = {{0,1},{0,-1},{1,0},{-1,0}};
-                int d = std::rand() % 4;
-                wander_dx_ = dirs[d][0];
-                wander_dy_ = dirs[d][1];
+                wander_timer_ = 5 + rng.below(10);
+                pick_wander_direction(rng);
             }
             break;
 
@@ -110,9 +103,16 @@ void Enemy::update(World& world, int player_x, int player_y) {
             break;
 
         case EnemyState::Wandering:
-            wander(world);
+            wander(world, rng);
             break;
     }
+}
+
+void Enemy::pick_wander_direction(Rng& rng) {
+    const int dirs[][2] = {{0,1},{0,-1},{1,0},{-1,0}};
+    int d = rng.below(4);
+    wander_dx_ = dirs[d][0];
+    wander_dy_ = dirs[d][1];
 }
 
 // Pack world coordinates into a single int64 for use as hash key
@@ -180,7 +180,7 @@ void Enemy::chase_player(int player_x, int player_y, World& world) {
     y_ = ty;
 }
 
-void Enemy::wander(World& world) {
+void Enemy::wander(World& world, Rng& rng) {
     wander_timer_--;
     if (wander_timer_ <= 0) {
         state_ = EnemyState::Idle;
@@ -195,9 +195,6 @@ void Enemy::wander(World& world) {
         x_ = nx;
         y_ = ny;
     } else {
-        const int dirs[][2] = {{0,1},{0,-1},{1,0},{-1,0}};
-        int d = std::rand() % 4;
-        wander_dx_ = dirs[d][0];
-        wander_dy_ = dirs[d][1];
+        pick_wander_direction(rng);
     }
 }
