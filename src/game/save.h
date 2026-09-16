@@ -12,7 +12,10 @@
 
 class World;
 
-static const int SAVE_VERSION = 6;
+// v7: enemies/NPCs are rebuilt from their archetype name on load rather than
+// from serialised stat fields, and the RNG state round-trips so a reloaded
+// game continues the same random sequence.
+static const int SAVE_VERSION = 7;
 static const int MAX_SAVE_SLOTS = 8;
 
 struct SaveMeta {
@@ -20,6 +23,8 @@ struct SaveMeta {
     std::string character_name;
     int play_time_seconds = 0;
     std::string timestamp;
+    int level = 1;
+    int day = 1;
 };
 
 struct GameState {
@@ -37,36 +42,31 @@ struct GameState {
     // World
     uint32_t map_seed = 0;
 
-    // NPCs
+    // Deterministic RNG state, so a reloaded game continues the same sequence.
+    uint64_t rng_state = 0;
+
+    // NPCs. Glyph, colours, merchant flag, dialogue and base shop stock come
+    // from make_npc(name); only mutable state is stored.
     struct NpcSave {
-        int x, y;
-        uint32_t glyph;
-        uint8_t fg_r, fg_g, fg_b;
+        int x = 0, y = 0;
         std::string name;
-        bool is_merchant;
-        int affinity;
+        int affinity = 30;
         std::vector<std::pair<Item, int>> shop_inventory;
     };
-    std::vector<NpcSave> npcs;
 
-    // Enemies
+    // Enemies. Stats, colours, glyph and drops come from make_enemy(name);
+    // only position and current HP are stored.
     struct EnemySave {
-        int x, y;
-        uint32_t glyph;
-        uint8_t fg_r, fg_g, fg_b;
+        int x = 0, y = 0;
         std::string name;
-        int hp, max_hp, attack, defense, damage_variance, xp_value;
+        int hp = 0;
     };
-    std::vector<EnemySave> enemies;
 
-    // World items
+    // World items. Glyph and colours come from the item database.
     struct WorldItemSave {
-        int x, y;
-        uint32_t glyph;
-        uint8_t fg_r, fg_g, fg_b;
+        int x = 0, y = 0;
         std::string item_name;
     };
-    std::vector<WorldItemSave> world_items;
 
     // Meta
     SaveMeta meta;
@@ -97,11 +97,16 @@ bool load_game(int slot, GameState& state);
 bool delete_save(int slot);
 std::vector<SaveMeta> list_saves();
 
+// Serialization split out from file I/O so it can be round-tripped in tests.
+std::string serialize_state(const GameState& state);
+bool deserialize_state(const std::string& json, GameState& state);
+
 // Helpers to convert between game objects and save state
 GameState capture_state(const Player& player, const World& world,
                         uint32_t map_seed,
                         int play_time_seconds,
-                        const TimeSystem& time_system);
+                        const TimeSystem& time_system,
+                        uint64_t rng_state);
 
 // Apply chunk save data to a world
 void apply_chunk_data(World& world, const std::vector<GameState::ChunkSave>& chunks);

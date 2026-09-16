@@ -1,17 +1,18 @@
 #include "game/save.h"
 #include "game/world.h"
-#include <fstream>
-#include <sstream>
-#include <filesystem>
-#include <ctime>
+#include "platform/paths.h"
 #include <algorithm>
-#include <iomanip>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
+#include <sstream>
 
 namespace fs = std::filesystem;
 
 static fs::path save_dir() {
-    fs::path dir = fs::path(std::getenv("APPDATA")) / "AsciiGame" / "saves";
-    fs::create_directories(dir);
+    fs::path dir = platform::user_data_dir() / "saves";
+    std::error_code ec;
+    fs::create_directories(dir, ec);
     return dir;
 }
 
@@ -19,40 +20,93 @@ static fs::path save_path(int slot) {
     return save_dir() / ("slot_" + std::to_string(slot) + ".json");
 }
 
-// ── JSON writers ────────────────────────────────────────────────────
+// ── JSON writer ─────────────────────────────────────────────────────
+//
+// Separators are emitted by the writer rather than by each call site, so it
+// cannot produce the trailing commas that made earlier saves invalid JSON.
 
-static std::string jesc(const std::string& s) {
-    std::string o;
+namespace {
+
+std::string json_escape(const std::string& s) {
+    std::string out;
+    out.reserve(s.size());
     for (char c : s) {
         switch (c) {
-            case '"': o += "\\\""; break;
-            case '\\': o += "\\\\"; break;
-            case '\n': o += "\\n"; break;
-            case '\r': o += "\\r"; break;
-            case '\t': o += "\\t"; break;
-            default: o += c; break;
+            case '"':  out += "\\\""; break;
+            case '\\': out += "\\\\"; break;
+            case '\n': out += "\\n"; break;
+            case '\r': out += "\\r"; break;
+            case '\t': out += "\\t"; break;
+            default:   out += c; break;
         }
     }
-    return o;
+    return out;
 }
 
-static std::string jstr(const std::string& k, const std::string& v, bool comma = true) {
-    return "\"" + k + "\": \"" + jesc(v) + "\"" + (comma ? "," : "");
-}
+class JsonWriter {
+public:
+    explicit JsonWriter(std::ostringstream& out) : out_(out) {}
 
-static std::string jint(const std::string& k, int v, bool comma = true) {
-    return "\"" + k + "\": " + std::to_string(v) + (comma ? "," : "");
-}
+    void begin_object() { separate(); out_ << '{'; push(false); }
+    void end_object() { pop(); out_ << '}'; }
 
-static std::string juint(const std::string& k, unsigned v, bool comma = true) {
-    return "\"" + k + "\": " + std::to_string(v) + (comma ? "," : "");
-}
+    void begin_array() { separate(); out_ << '['; push(true); }
+    void end_array() { pop(); out_ << ']'; }
 
-static std::string jbool(const std::string& k, bool v, bool comma = true) {
-    return "\"" + k + "\": " + (v ? "true" : "false") + (comma ? "," : "");
-}
+    void key(const std::string& k) {
+        separate();
+        out_ << '"' << json_escape(k) << "\": ";
+        suppress_next_separator_ = true;
+    }
 
-static std::string hex_string(const std::vector<bool>& bits) {
+    void begin_object(const std::string& k) { key(k); begin_object(); }
+    void begin_array(const std::string& k) { key(k); begin_array(); }
+
+    void value(int v) { separate(); out_ << v; }
+    void value(unsigned v) { separate(); out_ << v; }
+    void value(uint64_t v) { separate(); out_ << v; }
+    void value(bool v) { separate(); out_ << (v ? "true" : "false"); }
+    void value(const std::string& v) { separate(); out_ << '"' << json_escape(v) << '"'; }
+    void value(const char* v) { value(std::string(v)); }
+
+    template <typename T>
+    void field(const std::string& k, const T& v) { key(k); value(v); }
+
+private:
+    void push(bool is_array) {
+        scopes_.push_back({is_array, true});
+        suppress_next_separator_ = false;
+    }
+
+    void pop() {
+        if (!scopes_.empty()) scopes_.pop_back();
+        suppress_next_separator_ = false;
+    }
+
+    // Emits ", " between siblings, but never after a key or before the first
+    // element of a scope.
+    void separate() {
+        if (suppress_next_separator_) {
+            suppress_next_separator_ = false;
+            return;
+        }
+        if (scopes_.empty()) return;
+        Scope& scope = scopes_.back();
+        if (scope.first) {
+            scope.first = false;
+        } else {
+            out_ << ", ";
+        }
+    }
+
+    struct Scope { bool is_array; bool first; };
+
+    std::ostringstream& out_;
+    std::vector<Scope> scopes_;
+    bool suppress_next_separator_ = false;
+};
+
+std::string hex_string(const std::vector<bool>& bits) {
     std::string h;
     h.reserve(bits.size() / 4 + 1);
     int val = 0, shift = 0;
@@ -69,9 +123,9 @@ static std::string hex_string(const std::vector<bool>& bits) {
     return h;
 }
 
-static std::vector<bool> parse_hex(const std::string& h, int expected_bits) {
+std::vector<bool> parse_hex(const std::string& h, int expected_bits) {
     std::vector<bool> bits;
-    bits.reserve(expected_bits);
+    bits.reserve(static_cast<size_t>(expected_bits));
     for (char c : h) {
         int nibble = 0;
         if (c >= '0' && c <= '9') nibble = c - '0';
@@ -79,22 +133,26 @@ static std::vector<bool> parse_hex(const std::string& h, int expected_bits) {
         else if (c >= 'A' && c <= 'F') nibble = c - 'A' + 10;
         else continue;
         for (int i = 0; i < 4 && static_cast<int>(bits.size()) < expected_bits; ++i) {
-            bits.push_back((nibble >> i) & 1);
+            bits.push_back(((nibble >> i) & 1) != 0);
         }
     }
     while (static_cast<int>(bits.size()) < expected_bits) bits.push_back(false);
     return bits;
 }
 
-// ── JSON parser helpers ─────────────────────────────────────────────
+// ── JSON reader ─────────────────────────────────────────────────────
+//
+// A tolerant scanner rather than a full parser. Lookups match the first
+// occurrence of a key, so callers narrow to the enclosing object or array
+// with extract_object/extract_array before reading scalar fields.
 
-static std::string trim(const std::string& s) {
+std::string trim(const std::string& s) {
     size_t start = s.find_first_not_of(" \t\r\n");
     size_t end = s.find_last_not_of(" \t\r\n");
     return (start == std::string::npos) ? "" : s.substr(start, end - start + 1);
 }
 
-static std::string extract_value(const std::string& json, const std::string& key) {
+std::string extract_value(const std::string& json, const std::string& key) {
     std::string search = "\"" + key + "\"";
     size_t pos = json.find(search);
     if (pos == std::string::npos) return "";
@@ -112,551 +170,409 @@ static std::string extract_value(const std::string& json, const std::string& key
             end++;
         }
         return json.substr(pos, end - pos);
-    } else {
-        size_t end = pos;
-        while (end < json.size() && json[end] != ',' && json[end] != '}' && json[end] != ']') end++;
-        return trim(json.substr(pos, end - pos));
     }
+    size_t end = pos;
+    while (end < json.size() && json[end] != ',' && json[end] != '}' && json[end] != ']') end++;
+    return trim(json.substr(pos, end - pos));
 }
 
-static int extract_int(const std::string& json, const std::string& key, int def = 0) {
+int extract_int(const std::string& json, const std::string& key, int def = 0) {
     std::string val = extract_value(json, key);
     if (val.empty()) return def;
     try { return std::stoi(val); } catch (...) { return def; }
 }
 
-static bool extract_bool(const std::string& json, const std::string& key, bool def = false) {
+uint64_t extract_u64(const std::string& json, const std::string& key, uint64_t def = 0) {
     std::string val = extract_value(json, key);
-    if (val == "true") return true;
-    if (val == "false") return false;
-    return def;
+    if (val.empty()) return def;
+    try { return std::stoull(val); } catch (...) { return def; }
 }
 
-static std::string extract_string(const std::string& json, const std::string& key, const std::string& def = "") {
+std::string extract_string(const std::string& json, const std::string& key,
+                           const std::string& def = "") {
     std::string val = extract_value(json, key);
     return val.empty() ? def : val;
 }
 
-// Extract a JSON array section by key name — returns the raw array text
-static std::string extract_array(const std::string& json, const std::string& key) {
+// Raw text of a bracketed section, brace/bracket balanced.
+std::string extract_section(const std::string& json, const std::string& key,
+                            char open, char close) {
     std::string search = "\"" + key + "\"";
     size_t pos = json.find(search);
     if (pos == std::string::npos) return "";
-    pos = json.find('[', pos);
+    pos = json.find(open, pos);
     if (pos == std::string::npos) return "";
     int depth = 0;
     size_t start = pos;
     for (; pos < json.size(); ++pos) {
-        if (json[pos] == '[') depth++;
-        else if (json[pos] == ']') { depth--; if (depth == 0) return json.substr(start, pos - start + 1); }
+        if (json[pos] == open) depth++;
+        else if (json[pos] == close) {
+            depth--;
+            if (depth == 0) return json.substr(start, pos - start + 1);
+        }
     }
     return "";
 }
 
-// Extract a JSON object section by key name — returns the raw object text
-static std::string extract_object(const std::string& json, const std::string& key) {
-    std::string search = "\"" + key + "\"";
-    size_t pos = json.find(search);
-    if (pos == std::string::npos) return "";
-    pos = json.find('{', pos);
-    if (pos == std::string::npos) return "";
-    int depth = 0;
-    size_t start = pos;
-    for (; pos < json.size(); ++pos) {
-        if (json[pos] == '{') depth++;
-        else if (json[pos] == '}') { depth--; if (depth == 0) return json.substr(start, pos - start + 1); }
-    }
-    return "";
+std::string extract_array(const std::string& json, const std::string& key) {
+    return extract_section(json, key, '[', ']');
 }
 
-// Split a JSON array of objects into individual object strings
-static std::vector<std::string> split_array_objects(const std::string& arr) {
+std::string extract_object(const std::string& json, const std::string& key) {
+    return extract_section(json, key, '{', '}');
+}
+
+// Split a JSON array of objects into individual object strings.
+std::vector<std::string> split_array_objects(const std::string& arr) {
     std::vector<std::string> objects;
     int depth = 0;
     size_t start = 0;
     bool in_obj = false;
     for (size_t i = 0; i < arr.size(); ++i) {
-        if (arr[i] == '{') { if (depth == 0) { start = i; in_obj = true; } depth++; }
-        else if (arr[i] == '}') { depth--; if (depth == 0 && in_obj) { objects.push_back(arr.substr(start, i - start + 1)); in_obj = false; } }
+        if (arr[i] == '{') {
+            if (depth == 0) { start = i; in_obj = true; }
+            depth++;
+        } else if (arr[i] == '}') {
+            depth--;
+            if (depth == 0 && in_obj) {
+                objects.push_back(arr.substr(start, i - start + 1));
+                in_obj = false;
+            }
+        }
     }
     return objects;
 }
 
+// ── Per-entity writers ──────────────────────────────────────────────
+
+void write_item_stacks(JsonWriter& w, const std::vector<std::pair<Item, int>>& stacks) {
+    w.begin_array();
+    for (const auto& [item, qty] : stacks) {
+        w.begin_object();
+        w.field("name", item.name());
+        w.field("qty", qty);
+        w.end_object();
+    }
+    w.end_array();
+}
+
+void read_item_stacks(const std::string& arr, std::vector<std::pair<Item, int>>& out) {
+    out.clear();
+    for (const auto& obj : split_array_objects(arr)) {
+        const Item* item = find_item(extract_string(obj, "name"));
+        if (item) out.emplace_back(*item, extract_int(obj, "qty", 1));
+    }
+}
+
+void write_npcs(JsonWriter& w, const std::vector<GameState::NpcSave>& npcs) {
+    w.begin_array("npcs");
+    for (const auto& npc : npcs) {
+        w.begin_object();
+        w.field("x", npc.x);
+        w.field("y", npc.y);
+        w.field("name", npc.name);
+        w.field("affinity", npc.affinity);
+        w.key("shop");
+        write_item_stacks(w, npc.shop_inventory);
+        w.end_object();
+    }
+    w.end_array();
+}
+
+void read_npcs(const std::string& parent, std::vector<GameState::NpcSave>& out) {
+    out.clear();
+    for (const auto& obj : split_array_objects(extract_array(parent, "npcs"))) {
+        GameState::NpcSave npc;
+        npc.x = extract_int(obj, "x");
+        npc.y = extract_int(obj, "y");
+        npc.name = extract_string(obj, "name");
+        npc.affinity = extract_int(obj, "affinity", 30);
+        read_item_stacks(extract_array(obj, "shop"), npc.shop_inventory);
+        out.push_back(std::move(npc));
+    }
+}
+
+void write_enemies(JsonWriter& w, const std::vector<GameState::EnemySave>& enemies) {
+    w.begin_array("enemies");
+    for (const auto& e : enemies) {
+        w.begin_object();
+        w.field("x", e.x);
+        w.field("y", e.y);
+        w.field("name", e.name);
+        w.field("hp", e.hp);
+        w.end_object();
+    }
+    w.end_array();
+}
+
+void read_enemies(const std::string& parent, std::vector<GameState::EnemySave>& out) {
+    out.clear();
+    for (const auto& obj : split_array_objects(extract_array(parent, "enemies"))) {
+        GameState::EnemySave e;
+        e.x = extract_int(obj, "x");
+        e.y = extract_int(obj, "y");
+        e.name = extract_string(obj, "name");
+        e.hp = extract_int(obj, "hp", 1);
+        out.push_back(std::move(e));
+    }
+}
+
+void write_world_items(JsonWriter& w, const std::vector<GameState::WorldItemSave>& items) {
+    w.begin_array("world_items");
+    for (const auto& item : items) {
+        w.begin_object();
+        w.field("x", item.x);
+        w.field("y", item.y);
+        w.field("item_name", item.item_name);
+        w.end_object();
+    }
+    w.end_array();
+}
+
+void read_world_items(const std::string& parent,
+                      std::vector<GameState::WorldItemSave>& out) {
+    out.clear();
+    for (const auto& obj : split_array_objects(extract_array(parent, "world_items"))) {
+        GameState::WorldItemSave item;
+        item.x = extract_int(obj, "x");
+        item.y = extract_int(obj, "y");
+        item.item_name = extract_string(obj, "item_name");
+        out.push_back(std::move(item));
+    }
+}
+
+}
+
 // ── Save ────────────────────────────────────────────────────────────
+
+std::string serialize_state(const GameState& state) {
+    std::ostringstream ss;
+    JsonWriter w(ss);
+
+    w.begin_object();
+    w.field("version", SAVE_VERSION);
+
+    w.begin_object("meta");
+    w.field("slot", state.meta.slot);
+    w.field("character_name", state.meta.character_name);
+    w.field("play_time_seconds", state.meta.play_time_seconds);
+    w.field("turn_of_day", state.turn_of_day);
+    w.field("day", state.day);
+    w.field("timestamp", state.meta.timestamp);
+    w.end_object();
+
+    w.begin_object("player");
+    w.field("name", state.player_name);
+    w.field("x", state.player_x);
+    w.field("y", state.player_y);
+    w.field("gold", state.gold);
+    w.field("hp", state.hp);
+    w.field("xp", state.xp);
+    w.field("level", state.level);
+
+    w.begin_object("stats");
+    w.field("str", state.stats.str);
+    w.field("dex", state.stats.dex);
+    w.field("con", state.stats.con);
+    w.field("intel", state.stats.intel);
+    w.field("wis", state.stats.wis);
+    w.field("cha", state.stats.cha);
+    w.end_object();
+
+    w.key("inventory");
+    write_item_stacks(w, state.inventory);
+
+    w.begin_array("equipment");
+    for (const auto& [slot, item] : state.equipment) {
+        w.begin_object();
+        w.field("slot", static_cast<int>(slot));
+        w.field("name", item.name());
+        w.end_object();
+    }
+    w.end_array();
+    w.end_object(); // player
+
+    w.begin_object("world");
+    w.field("seed", static_cast<unsigned>(state.map_seed));
+    w.field("rng_state", state.rng_state);
+    w.end_object();
+
+    w.begin_array("zones");
+    for (const auto& z : state.zones) {
+        w.begin_object();
+        w.field("x0", z.x0);
+        w.field("y0", z.y0);
+        w.field("x1", z.x1);
+        w.field("y1", z.y1);
+        w.field("type", static_cast<int>(z.type));
+        w.end_object();
+    }
+    w.end_array();
+
+    w.begin_array("chunks");
+    for (const auto& chunk : state.chunks) {
+        w.begin_object();
+        w.field("cx", chunk.cx);
+        w.field("cy", chunk.cy);
+        w.field("explored_hex", chunk.explored_hex);
+
+        w.begin_array("mods");
+        for (const auto& mod : chunk.modifications) {
+            w.begin_object();
+            w.field("lx", mod.local_x);
+            w.field("ly", mod.local_y);
+            w.field("type", static_cast<int>(mod.type));
+            w.end_object();
+        }
+        w.end_array();
+
+        w.begin_array("placed");
+        for (const auto& obj : chunk.placed_objects) {
+            w.begin_object();
+            w.field("lx", obj.local_x);
+            w.field("ly", obj.local_y);
+            w.field("glyph", static_cast<unsigned>(obj.glyph));
+            w.field("name", obj.name);
+            w.field("fg_r", static_cast<int>(obj.fg_r));
+            w.field("fg_g", static_cast<int>(obj.fg_g));
+            w.field("fg_b", static_cast<int>(obj.fg_b));
+            w.field("is_light", obj.is_light);
+            w.field("light_radius", obj.light_radius);
+            w.end_object();
+        }
+        w.end_array();
+
+        write_npcs(w, chunk.npcs);
+        write_enemies(w, chunk.enemies);
+        write_world_items(w, chunk.world_items);
+        w.end_object();
+    }
+    w.end_array();
+
+    w.end_object();
+    ss << "\n";
+    return ss.str();
+}
 
 bool save_game(int slot, const GameState& state) {
     if (slot < 0 || slot >= MAX_SAVE_SLOTS) return false;
 
-    std::ostringstream ss;
-    ss << "{\n";
-    ss << "  " << jint("version", SAVE_VERSION) << "\n";
+    GameState stamped = state;
+    stamped.meta.slot = slot;
 
-    // Meta
-    ss << "  \"meta\": {\n";
-    ss << "    " << jint("slot", slot) << "\n";
-    ss << "    " << jstr("character_name", state.player_name) << "\n";
-    ss << "    " << jint("play_time_seconds", state.meta.play_time_seconds) << "\n";
-    ss << "    " << jint("turn_of_day", state.turn_of_day) << "\n";
-    ss << "    " << jint("day", state.day) << "\n";
-    ss << "    " << jstr("timestamp", state.meta.timestamp, false) << "\n";
-    ss << "  },\n";
-
-    // Player
-    ss << "  \"player\": {\n";
-    ss << "    " << jstr("name", state.player_name) << "\n";
-    ss << "    " << jint("x", state.player_x) << "\n";
-    ss << "    " << jint("y", state.player_y) << "\n";
-    ss << "    " << jint("gold", state.gold) << "\n";
-    ss << "    " << jint("hp", state.hp) << "\n";
-    ss << "    " << jint("xp", state.xp) << "\n";
-    ss << "    " << jint("level", state.level) << "\n";
-    ss << "    \"stats\": {\n";
-    ss << "      " << jint("str", state.stats.str) << "\n";
-    ss << "      " << jint("dex", state.stats.dex) << "\n";
-    ss << "      " << jint("con", state.stats.con) << "\n";
-    ss << "      " << jint("intel", state.stats.intel) << "\n";
-    ss << "      " << jint("wis", state.stats.wis) << "\n";
-    ss << "      " << jint("cha", state.stats.cha, false) << "\n";
-    ss << "    },\n";
-
-    // Inventory
-    ss << "    \"inventory\": [\n";
-    for (int i = 0; i < static_cast<int>(state.inventory.size()); ++i) {
-        const auto& [item, qty] = state.inventory[i];
-        ss << "      { \"name\": \"" << jesc(item.name()) << "\", \"qty\": " << qty << " }";
-        if (i < static_cast<int>(state.inventory.size()) - 1) ss << ",";
-        ss << "\n";
-    }
-    ss << "    ],\n";
-
-    // Equipment
-    ss << "    \"equipment\": [\n";
-    {
-        int i = 0;
-        int count = static_cast<int>(state.equipment.size());
-        for (const auto& [slot, item] : state.equipment) {
-            ss << "      { " << jint("slot", static_cast<int>(slot))
-               << " " << jstr("name", item.name(), false) << " }";
-            if (i < count - 1) ss << ",";
-            ss << "\n";
-            i++;
-        }
-    }
-    ss << "    ],\n";
-    ss << "  },\n";
-
-    // World
-    ss << "  \"world\": {\n";
-    ss << "    " << juint("seed", state.map_seed, false) << "\n";
-    ss << "  },\n";
-
-    // Zones
-    ss << "  \"zones\": [\n";
-    for (int i = 0; i < static_cast<int>(state.zones.size()); ++i) {
-        const auto& z = state.zones[i];
-        ss << "    { " << jint("x0", z.x0) << " " << jint("y0", z.y0)
-           << " " << jint("x1", z.x1) << " " << jint("y1", z.y1)
-           << " " << jint("type", static_cast<int>(z.type), false) << " }";
-        if (i < static_cast<int>(state.zones.size()) - 1) ss << ",";
-        ss << "\n";
-    }
-    ss << "  ],\n";
-
-    // NPCs
-    ss << "  \"npcs\": [\n";
-    for (int i = 0; i < static_cast<int>(state.npcs.size()); ++i) {
-        const auto& npc = state.npcs[i];
-        ss << "    { " << jint("x", npc.x) << " " << jint("y", npc.y)
-           << " " << juint("glyph", npc.glyph)
-           << " " << jint("fg_r", npc.fg_r) << " " << jint("fg_g", npc.fg_g) << " " << jint("fg_b", npc.fg_b)
-           << " " << jstr("name", npc.name) << " " << jbool("is_merchant", npc.is_merchant)
-           << " " << jint("affinity", npc.affinity) << "\n";
-        ss << "      \"shop\": [";
-        for (int j = 0; j < static_cast<int>(npc.shop_inventory.size()); ++j) {
-            const auto& [item, qty] = npc.shop_inventory[j];
-            ss << "{ \"name\": \"" << jesc(item.name()) << "\", \"qty\": " << qty << " }";
-            if (j < static_cast<int>(npc.shop_inventory.size()) - 1) ss << ", ";
-        }
-        ss << "] }";
-        if (i < static_cast<int>(state.npcs.size()) - 1) ss << ",";
-        ss << "\n";
-    }
-    ss << "  ],\n";
-
-    // Enemies
-    ss << "  \"enemies\": [\n";
-    for (int i = 0; i < static_cast<int>(state.enemies.size()); ++i) {
-        const auto& e = state.enemies[i];
-        ss << "    { " << jint("x", e.x) << " " << jint("y", e.y)
-           << " " << juint("glyph", e.glyph)
-           << " " << jint("fg_r", e.fg_r) << " " << jint("fg_g", e.fg_g) << " " << jint("fg_b", e.fg_b)
-           << " " << jstr("name", e.name)
-           << " " << jint("hp", e.hp) << " " << jint("max_hp", e.max_hp)
-           << " " << jint("attack", e.attack) << " " << jint("defense", e.defense)
-           << " " << jint("damage_variance", e.damage_variance)
-           << " " << jint("xp_value", e.xp_value, false) << " }";
-        if (i < static_cast<int>(state.enemies.size()) - 1) ss << ",";
-        ss << "\n";
-    }
-    ss << "  ],\n";
-
-    // World items
-    ss << "  \"world_items\": [\n";
-    for (int i = 0; i < static_cast<int>(state.world_items.size()); ++i) {
-        const auto& wi = state.world_items[i];
-        ss << "    { " << jint("x", wi.x) << " " << jint("y", wi.y)
-           << " " << juint("glyph", wi.glyph)
-           << " " << jint("fg_r", wi.fg_r) << " " << jint("fg_g", wi.fg_g) << " " << jint("fg_b", wi.fg_b)
-           << " " << jstr("item_name", wi.item_name, false) << " }";
-        if (i < static_cast<int>(state.world_items.size()) - 1) ss << ",";
-        ss << "\n";
-    }
-    ss << "  ],\n";
-
-    // Chunks (per-chunk explored + modifications)
-    ss << "  \"chunks\": [\n";
-    for (int ci = 0; ci < static_cast<int>(state.chunks.size()); ++ci) {
-        const auto& ch = state.chunks[ci];
-        ss << "    { " << jint("cx", ch.cx) << " " << jint("cy", ch.cy)
-           << " " << jstr("explored_hex", ch.explored_hex);
-        // Modifications
-        ss << " \"mods\": [";
-        for (int mi = 0; mi < static_cast<int>(ch.modifications.size()); ++mi) {
-            const auto& mod = ch.modifications[mi];
-            ss << "{ " << jint("lx", mod.local_x) << " " << jint("ly", mod.local_y)
-               << " " << jint("type", static_cast<int>(mod.type), false) << " }";
-            if (mi < static_cast<int>(ch.modifications.size()) - 1) ss << ", ";
-        }
-        ss << "]";
-        // Placed objects
-        ss << " \"placed\": [";
-        for (int pi = 0; pi < static_cast<int>(ch.placed_objects.size()); ++pi) {
-            const auto& po = ch.placed_objects[pi];
-            ss << "{ " << jint("lx", po.local_x) << " " << jint("ly", po.local_y)
-               << " " << juint("glyph", po.glyph)
-               << " " << jstr("name", po.name)
-               << " " << jint("fg_r", po.fg_r) << " " << jint("fg_g", po.fg_g) << " " << jint("fg_b", po.fg_b)
-               << " " << jbool("is_light", po.is_light)
-               << " " << jint("light_radius", po.light_radius, false) << " }";
-            if (pi < static_cast<int>(ch.placed_objects.size()) - 1) ss << ", ";
-        }
-        ss << "]";
-        // Per-chunk NPCs
-        ss << " \"npcs\": [";
-        for (int ni = 0; ni < static_cast<int>(ch.npcs.size()); ++ni) {
-            const auto& npc = ch.npcs[ni];
-            ss << "{ " << jint("x", npc.x) << " " << jint("y", npc.y)
-               << " " << juint("glyph", npc.glyph)
-               << " " << jint("fg_r", npc.fg_r) << " " << jint("fg_g", npc.fg_g) << " " << jint("fg_b", npc.fg_b)
-               << " " << jstr("name", npc.name) << " " << jbool("is_merchant", npc.is_merchant)
-               << " " << jint("affinity", npc.affinity) << "\n";
-            ss << "        \"shop\": [";
-            for (int sj = 0; sj < static_cast<int>(npc.shop_inventory.size()); ++sj) {
-                const auto& [item, qty] = npc.shop_inventory[sj];
-                ss << "{ \"name\": \"" << jesc(item.name()) << "\", \"qty\": " << qty << " }";
-                if (sj < static_cast<int>(npc.shop_inventory.size()) - 1) ss << ", ";
-            }
-            ss << "] }";
-            if (ni < static_cast<int>(ch.npcs.size()) - 1) ss << ", ";
-        }
-        ss << "]";
-        // Per-chunk enemies
-        ss << " \"enemies\": [";
-        for (int ei = 0; ei < static_cast<int>(ch.enemies.size()); ++ei) {
-            const auto& e = ch.enemies[ei];
-            ss << "{ " << jint("x", e.x) << " " << jint("y", e.y)
-               << " " << juint("glyph", e.glyph)
-               << " " << jint("fg_r", e.fg_r) << " " << jint("fg_g", e.fg_g) << " " << jint("fg_b", e.fg_b)
-               << " " << jstr("name", e.name)
-               << " " << jint("hp", e.hp) << " " << jint("max_hp", e.max_hp)
-               << " " << jint("attack", e.attack) << " " << jint("defense", e.defense)
-               << " " << jint("damage_variance", e.damage_variance)
-               << " " << jint("xp_value", e.xp_value, false) << " }";
-            if (ei < static_cast<int>(ch.enemies.size()) - 1) ss << ", ";
-        }
-        ss << "]";
-        // Per-chunk world items
-        ss << " \"world_items\": [";
-        for (int wi = 0; wi < static_cast<int>(ch.world_items.size()); ++wi) {
-            const auto& w = ch.world_items[wi];
-            ss << "{ " << jint("x", w.x) << " " << jint("y", w.y)
-               << " " << juint("glyph", w.glyph)
-               << " " << jint("fg_r", w.fg_r) << " " << jint("fg_g", w.fg_g) << " " << jint("fg_b", w.fg_b)
-               << " " << jstr("item_name", w.item_name, false) << " }";
-            if (wi < static_cast<int>(ch.world_items.size()) - 1) ss << ", ";
-        }
-        ss << "]";
-        ss << " }";
-        if (ci < static_cast<int>(state.chunks.size()) - 1) ss << ",";
-        ss << "\n";
-    }
-    ss << "  ]\n";
-
-    ss << "}\n";
-
-    std::ofstream f(save_path(slot));
+    std::ofstream f(save_path(slot), std::ios::binary | std::ios::trunc);
     if (!f.is_open()) return false;
-    f << ss.str();
+    f << serialize_state(stamped);
+    f.flush();
     return f.good();
 }
 
 // ── Load ────────────────────────────────────────────────────────────
 
-bool load_game(int slot, GameState& state) {
-    if (slot < 0 || slot >= MAX_SAVE_SLOTS) return false;
+bool deserialize_state(const std::string& json, GameState& state) {
+    if (extract_int(json, "version") < 1) return false;
 
-    std::ifstream f(save_path(slot));
-    if (!f.is_open()) return false;
+    // Narrow to each section before reading scalars: key lookups match the
+    // first occurrence, so unscoped reads would pick up same-named fields
+    // from elsewhere in the document.
+    const std::string meta = extract_object(json, "meta");
+    const std::string player = extract_object(json, "player");
+    const std::string world = extract_object(json, "world");
 
-    std::string json((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    state.player_name = extract_string(player, "name", "Player");
+    state.player_x = extract_int(player, "x");
+    state.player_y = extract_int(player, "y");
+    state.gold = extract_int(player, "gold", 50);
+    state.hp = extract_int(player, "hp", 20);
+    state.xp = extract_int(player, "xp");
+    state.level = extract_int(player, "level", 1);
 
-    int version = extract_int(json, "version");
-    if (version < 1) return false;
+    const std::string stats = extract_object(player, "stats");
+    state.stats.str = extract_int(stats, "str", 10);
+    state.stats.dex = extract_int(stats, "dex", 10);
+    state.stats.con = extract_int(stats, "con", 10);
+    state.stats.intel = extract_int(stats, "intel", 10);
+    state.stats.wis = extract_int(stats, "wis", 10);
+    state.stats.cha = extract_int(stats, "cha", 10);
 
-    // Player
-    state.player_name = extract_string(json, "name");
-    state.player_x = extract_int(json, "x");
-    state.player_y = extract_int(json, "y");
-    state.gold = extract_int(json, "gold", 50);
-    state.hp = extract_int(json, "hp", 20);
-    state.xp = extract_int(json, "xp");
-    state.level = extract_int(json, "level", 1);
-    state.stats.str = extract_int(json, "str", 10);
-    state.stats.dex = extract_int(json, "dex", 10);
-    state.stats.con = extract_int(json, "con", 10);
-    state.stats.intel = extract_int(json, "intel", 10);
-    state.stats.wis = extract_int(json, "wis", 10);
-    state.stats.cha = extract_int(json, "cha", 10);
+    read_item_stacks(extract_array(player, "inventory"), state.inventory);
 
-    // Inventory
-    state.inventory.clear();
-    {
-        std::string inv_arr = extract_array(json, "inventory");
-        auto objs = split_array_objects(inv_arr);
-        for (const auto& obj : objs) {
-            std::string name = extract_string(obj, "name");
-            int qty = extract_int(obj, "qty", 1);
-            const Item* item = find_item(name);
-            if (item) state.inventory.emplace_back(*item, qty);
-        }
-    }
-
-    // Equipment
     state.equipment.clear();
-    {
-        std::string eq_arr = extract_array(json, "equipment");
-        auto objs = split_array_objects(eq_arr);
-        for (const auto& obj : objs) {
-            EquipSlot slot = static_cast<EquipSlot>(extract_int(obj, "slot", 0));
-            std::string name = extract_string(obj, "name");
-            const Item* item = find_item(name);
-            if (item && slot != EquipSlot::None) {
-                state.equipment[slot] = *item;
-            }
-        }
+    for (const auto& obj : split_array_objects(extract_array(player, "equipment"))) {
+        EquipSlot slot = static_cast<EquipSlot>(extract_int(obj, "slot", 0));
+        const Item* item = find_item(extract_string(obj, "name"));
+        if (item && slot != EquipSlot::None) state.equipment[slot] = *item;
     }
 
-    // World
-    state.map_seed = static_cast<uint32_t>(extract_int(json, "seed"));
+    state.map_seed = static_cast<uint32_t>(extract_u64(world, "seed"));
+    state.rng_state = extract_u64(world, "rng_state");
 
-    // Meta
-    state.meta.character_name = extract_string(json, "character_name");
-    state.meta.play_time_seconds = extract_int(json, "play_time_seconds");
-    state.turn_of_day = extract_int(json, "turn_of_day", 150);
-    state.day = extract_int(json, "day", 1);
+    state.meta.slot = extract_int(meta, "slot", -1);
+    state.meta.character_name = extract_string(meta, "character_name");
+    state.meta.play_time_seconds = extract_int(meta, "play_time_seconds");
+    state.meta.timestamp = extract_string(meta, "timestamp");
+    state.turn_of_day = extract_int(meta, "turn_of_day", 150);
+    state.day = extract_int(meta, "day", 1);
 
-    // Zones (v6+; absent in older saves)
     state.zones.clear();
-    {
-        std::string z_arr = extract_array(json, "zones");
-        auto objs = split_array_objects(z_arr);
-        for (const auto& obj : objs) {
-            Zone z;
-            z.x0 = extract_int(obj, "x0");
-            z.y0 = extract_int(obj, "y0");
-            z.x1 = extract_int(obj, "x1");
-            z.y1 = extract_int(obj, "y1");
-            z.type = static_cast<ZoneType>(extract_int(obj, "type"));
-            state.zones.push_back(z);
-        }
+    for (const auto& obj : split_array_objects(extract_array(json, "zones"))) {
+        Zone z;
+        z.x0 = extract_int(obj, "x0");
+        z.y0 = extract_int(obj, "y0");
+        z.x1 = extract_int(obj, "x1");
+        z.y1 = extract_int(obj, "y1");
+        z.type = static_cast<ZoneType>(extract_int(obj, "type"));
+        state.zones.push_back(z);
     }
 
-    // NPCs
-    state.npcs.clear();
-    {
-        std::string npc_arr = extract_array(json, "npcs");
-        auto objs = split_array_objects(npc_arr);
-        for (const auto& obj : objs) {
-            GameState::NpcSave ns;
-            ns.x = extract_int(obj, "x");
-            ns.y = extract_int(obj, "y");
-            ns.glyph = static_cast<uint32_t>(extract_int(obj, "glyph"));
-            ns.fg_r = static_cast<uint8_t>(extract_int(obj, "fg_r", 200));
-            ns.fg_g = static_cast<uint8_t>(extract_int(obj, "fg_g", 200));
-            ns.fg_b = static_cast<uint8_t>(extract_int(obj, "fg_b", 200));
-            ns.name = extract_string(obj, "name");
-            ns.is_merchant = extract_bool(obj, "is_merchant");
-            ns.affinity = extract_int(obj, "affinity", 30);
-            // Shop inventory
-            std::string shop_arr = extract_array(obj, "shop");
-            auto shop_objs = split_array_objects(shop_arr);
-            for (const auto& si : shop_objs) {
-                std::string iname = extract_string(si, "name");
-                int qty = extract_int(si, "qty", 1);
-                const Item* item = find_item(iname);
-                if (item) ns.shop_inventory.emplace_back(*item, qty);
-            }
-            state.npcs.push_back(ns);
-        }
-    }
-
-    // Enemies
-    state.enemies.clear();
-    {
-        std::string e_arr = extract_array(json, "enemies");
-        auto objs = split_array_objects(e_arr);
-        for (const auto& obj : objs) {
-            GameState::EnemySave es;
-            es.x = extract_int(obj, "x");
-            es.y = extract_int(obj, "y");
-            es.glyph = static_cast<uint32_t>(extract_int(obj, "glyph"));
-            es.fg_r = static_cast<uint8_t>(extract_int(obj, "fg_r", 200));
-            es.fg_g = static_cast<uint8_t>(extract_int(obj, "fg_g", 200));
-            es.fg_b = static_cast<uint8_t>(extract_int(obj, "fg_b", 200));
-            es.name = extract_string(obj, "name");
-            es.hp = extract_int(obj, "hp", 10);
-            es.max_hp = extract_int(obj, "max_hp", 10);
-            es.attack = extract_int(obj, "attack", 2);
-            es.defense = extract_int(obj, "defense", 0);
-            es.damage_variance = extract_int(obj, "damage_variance", 0);
-            es.xp_value = extract_int(obj, "xp_value", 5);
-            state.enemies.push_back(es);
-        }
-    }
-
-    // World items
-    state.world_items.clear();
-    {
-        std::string wi_arr = extract_array(json, "world_items");
-        auto objs = split_array_objects(wi_arr);
-        for (const auto& obj : objs) {
-            GameState::WorldItemSave wi;
-            wi.x = extract_int(obj, "x");
-            wi.y = extract_int(obj, "y");
-            wi.glyph = static_cast<uint32_t>(extract_int(obj, "glyph"));
-            wi.fg_r = static_cast<uint8_t>(extract_int(obj, "fg_r", 200));
-            wi.fg_g = static_cast<uint8_t>(extract_int(obj, "fg_g", 200));
-            wi.fg_b = static_cast<uint8_t>(extract_int(obj, "fg_b", 200));
-            wi.item_name = extract_string(obj, "item_name");
-            state.world_items.push_back(wi);
-        }
-    }
-
-    // Chunks
     state.chunks.clear();
-    {
-        std::string ch_arr = extract_array(json, "chunks");
-        auto objs = split_array_objects(ch_arr);
-        for (const auto& obj : objs) {
-            GameState::ChunkSave cs;
-            cs.cx = extract_int(obj, "cx");
-            cs.cy = extract_int(obj, "cy");
-            cs.explored_hex = extract_string(obj, "explored_hex");
-            // Modifications
-            std::string mods_arr = extract_array(obj, "mods");
-            auto mod_objs = split_array_objects(mods_arr);
-            for (const auto& mo : mod_objs) {
-                TileMod mod;
-                mod.local_x = extract_int(mo, "lx");
-                mod.local_y = extract_int(mo, "ly");
-                mod.type = static_cast<TileType>(extract_int(mo, "type"));
-                cs.modifications.push_back(mod);
-            }
-            // Placed objects
-            std::string placed_arr = extract_array(obj, "placed");
-            auto placed_objs = split_array_objects(placed_arr);
-            for (const auto& po : placed_objs) {
-                PlacedObject pobj;
-                pobj.local_x = extract_int(po, "lx");
-                pobj.local_y = extract_int(po, "ly");
-                pobj.glyph = static_cast<uint32_t>(extract_int(po, "glyph"));
-                pobj.name = extract_string(po, "name");
-                pobj.fg_r = static_cast<uint8_t>(extract_int(po, "fg_r", 200));
-                pobj.fg_g = static_cast<uint8_t>(extract_int(po, "fg_g", 200));
-                pobj.fg_b = static_cast<uint8_t>(extract_int(po, "fg_b", 200));
-                pobj.is_light = extract_bool(po, "is_light");
-                pobj.light_radius = extract_int(po, "light_radius", 0);
-                cs.placed_objects.push_back(pobj);
-            }
-            // Per-chunk NPCs
-            {
-                std::string npc_arr = extract_array(obj, "npcs");
-                auto npc_objs = split_array_objects(npc_arr);
-                for (const auto& nobj : npc_objs) {
-                    GameState::NpcSave ns;
-                    ns.x = extract_int(nobj, "x");
-                    ns.y = extract_int(nobj, "y");
-                    ns.glyph = static_cast<uint32_t>(extract_int(nobj, "glyph"));
-                    ns.fg_r = static_cast<uint8_t>(extract_int(nobj, "fg_r", 200));
-                    ns.fg_g = static_cast<uint8_t>(extract_int(nobj, "fg_g", 200));
-                    ns.fg_b = static_cast<uint8_t>(extract_int(nobj, "fg_b", 200));
-                    ns.name = extract_string(nobj, "name");
-                    ns.is_merchant = extract_bool(nobj, "is_merchant");
-                    ns.affinity = extract_int(nobj, "affinity", 30);
-                    std::string shop_arr = extract_array(nobj, "shop");
-                    auto shop_objs = split_array_objects(shop_arr);
-                    for (const auto& si : shop_objs) {
-                        std::string iname = extract_string(si, "name");
-                        int qty = extract_int(si, "qty", 1);
-                        const Item* item = find_item(iname);
-                        if (item) ns.shop_inventory.emplace_back(*item, qty);
-                    }
-                    cs.npcs.push_back(ns);
-                }
-            }
-            // Per-chunk enemies
-            {
-                std::string e_arr = extract_array(obj, "enemies");
-                auto e_objs = split_array_objects(e_arr);
-                for (const auto& eobj : e_objs) {
-                    GameState::EnemySave es;
-                    es.x = extract_int(eobj, "x");
-                    es.y = extract_int(eobj, "y");
-                    es.glyph = static_cast<uint32_t>(extract_int(eobj, "glyph"));
-                    es.fg_r = static_cast<uint8_t>(extract_int(eobj, "fg_r", 200));
-                    es.fg_g = static_cast<uint8_t>(extract_int(eobj, "fg_g", 200));
-                    es.fg_b = static_cast<uint8_t>(extract_int(eobj, "fg_b", 200));
-                    es.name = extract_string(eobj, "name");
-                    es.hp = extract_int(eobj, "hp", 10);
-                    es.max_hp = extract_int(eobj, "max_hp", 10);
-                    es.attack = extract_int(eobj, "attack", 2);
-                    es.defense = extract_int(eobj, "defense", 0);
-                    es.damage_variance = extract_int(eobj, "damage_variance", 0);
-                    es.xp_value = extract_int(eobj, "xp_value", 5);
-                    cs.enemies.push_back(es);
-                }
-            }
-            // Per-chunk world items
-            {
-                std::string wi_arr = extract_array(obj, "world_items");
-                auto wi_objs = split_array_objects(wi_arr);
-                for (const auto& wobj : wi_objs) {
-                    GameState::WorldItemSave wi;
-                    wi.x = extract_int(wobj, "x");
-                    wi.y = extract_int(wobj, "y");
-                    wi.glyph = static_cast<uint32_t>(extract_int(wobj, "glyph"));
-                    wi.fg_r = static_cast<uint8_t>(extract_int(wobj, "fg_r", 200));
-                    wi.fg_g = static_cast<uint8_t>(extract_int(wobj, "fg_g", 200));
-                    wi.fg_b = static_cast<uint8_t>(extract_int(wobj, "fg_b", 200));
-                    wi.item_name = extract_string(wobj, "item_name");
-                    cs.world_items.push_back(wi);
-                }
-            }
-            state.chunks.push_back(std::move(cs));
+    for (const auto& obj : split_array_objects(extract_array(json, "chunks"))) {
+        GameState::ChunkSave chunk;
+        chunk.cx = extract_int(obj, "cx");
+        chunk.cy = extract_int(obj, "cy");
+        chunk.explored_hex = extract_string(obj, "explored_hex");
+
+        for (const auto& mod_obj : split_array_objects(extract_array(obj, "mods"))) {
+            TileMod mod;
+            mod.local_x = extract_int(mod_obj, "lx");
+            mod.local_y = extract_int(mod_obj, "ly");
+            mod.type = static_cast<TileType>(extract_int(mod_obj, "type"));
+            chunk.modifications.push_back(mod);
         }
+
+        for (const auto& placed_obj : split_array_objects(extract_array(obj, "placed"))) {
+            PlacedObject obj_data;
+            obj_data.local_x = extract_int(placed_obj, "lx");
+            obj_data.local_y = extract_int(placed_obj, "ly");
+            obj_data.glyph = static_cast<uint32_t>(extract_int(placed_obj, "glyph", ' '));
+            obj_data.name = extract_string(placed_obj, "name");
+            obj_data.fg_r = static_cast<uint8_t>(extract_int(placed_obj, "fg_r", 200));
+            obj_data.fg_g = static_cast<uint8_t>(extract_int(placed_obj, "fg_g", 200));
+            obj_data.fg_b = static_cast<uint8_t>(extract_int(placed_obj, "fg_b", 200));
+            obj_data.is_light = extract_string(placed_obj, "is_light") == "true";
+            obj_data.light_radius = extract_int(placed_obj, "light_radius", 0);
+            obj_data.player_placed = true; // only player objects are persisted
+            chunk.placed_objects.push_back(std::move(obj_data));
+        }
+
+        read_npcs(obj, chunk.npcs);
+        read_enemies(obj, chunk.enemies);
+        read_world_items(obj, chunk.world_items);
+
+        state.chunks.push_back(std::move(chunk));
     }
 
     return true;
+}
+
+bool load_game(int slot, GameState& state) {
+    if (slot < 0 || slot >= MAX_SAVE_SLOTS) return false;
+
+    std::ifstream f(save_path(slot), std::ios::binary);
+    if (!f.is_open()) return false;
+
+    std::string json((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    return deserialize_state(json, state);
 }
 
 // ── Delete / List ───────────────────────────────────────────────────
@@ -664,23 +580,29 @@ bool load_game(int slot, GameState& state) {
 bool delete_save(int slot) {
     if (slot < 0 || slot >= MAX_SAVE_SLOTS) return false;
     fs::path p = save_path(slot);
-    if (fs::exists(p)) return fs::remove(p);
+    std::error_code ec;
+    if (fs::exists(p, ec)) return fs::remove(p, ec);
     return true;
 }
 
 std::vector<SaveMeta> list_saves() {
     std::vector<SaveMeta> saves;
     for (int i = 0; i < MAX_SAVE_SLOTS; ++i) {
-        std::ifstream f(save_path(i));
-        if (f.is_open()) {
-            std::string json((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
-            SaveMeta meta;
-            meta.slot = i;
-            meta.character_name = extract_string(json, "character_name");
-            meta.play_time_seconds = extract_int(json, "play_time_seconds");
-            meta.timestamp = extract_string(json, "timestamp");
-            saves.push_back(meta);
-        }
+        std::ifstream f(save_path(i), std::ios::binary);
+        if (!f.is_open()) continue;
+
+        std::string json((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+        const std::string meta = extract_object(json, "meta");
+        const std::string player = extract_object(json, "player");
+
+        SaveMeta entry;
+        entry.slot = i;
+        entry.character_name = extract_string(meta, "character_name", "Player");
+        entry.play_time_seconds = extract_int(meta, "play_time_seconds");
+        entry.timestamp = extract_string(meta, "timestamp");
+        entry.level = extract_int(player, "level", 1);
+        entry.day = extract_int(meta, "day", 1);
+        saves.push_back(std::move(entry));
     }
     return saves;
 }
@@ -690,10 +612,10 @@ std::vector<SaveMeta> list_saves() {
 GameState capture_state(const Player& player, const World& world,
                         uint32_t map_seed,
                         int play_time_seconds,
-                        const TimeSystem& time_system) {
+                        const TimeSystem& time_system,
+                        uint64_t rng_state) {
     GameState state;
 
-    // Player
     state.player_name = "Player";
     state.player_x = player.x();
     state.player_y = player.y();
@@ -705,130 +627,109 @@ GameState capture_state(const Player& player, const World& world,
     state.xp = player.xp();
     state.level = player.level();
 
-    // World
     state.map_seed = map_seed;
+    state.rng_state = rng_state;
     state.zones = world.zones();
 
-    // Per-chunk data (explored tiles, modifications, placed objects)
-    auto chunk_data = world.gather_save_data();
-    for (const auto& cd : chunk_data) {
-        GameState::ChunkSave cs;
-        cs.cx = cd.cx;
-        cs.cy = cd.cy;
-        cs.explored_hex = hex_string(cd.explored);
-        cs.modifications = cd.modifications;
-        cs.placed_objects = cd.placed_objects;
-        state.chunks.push_back(std::move(cs));
+    // Terrain deltas and exploration, for loaded and archived chunks alike.
+    for (const auto& cd : world.gather_save_data()) {
+        GameState::ChunkSave chunk;
+        chunk.cx = cd.cx;
+        chunk.cy = cd.cy;
+        chunk.explored_hex = hex_string(cd.explored);
+        chunk.modifications = cd.modifications;
+        chunk.placed_objects = cd.placed_objects;
+        state.chunks.push_back(std::move(chunk));
     }
 
-    // Entities from World (per-chunk, stored in ChunkSave)
-    auto entity_data = world.gather_entity_save_data();
-    for (const auto& ed : entity_data) {
-        // Find the matching ChunkSave entry
-        GameState::ChunkSave* cs = nullptr;
-        for (auto& c : state.chunks) {
-            if (c.cx == ed.cx && c.cy == ed.cy) { cs = &c; break; }
+    // Entities, filed into their chunk's entry.
+    for (const auto& ed : world.gather_entity_save_data()) {
+        GameState::ChunkSave* chunk = nullptr;
+        for (auto& candidate : state.chunks) {
+            if (candidate.cx == ed.cx && candidate.cy == ed.cy) { chunk = &candidate; break; }
         }
-        if (!cs) continue;
+        if (!chunk) {
+            GameState::ChunkSave created;
+            created.cx = ed.cx;
+            created.cy = ed.cy;
+            state.chunks.push_back(std::move(created));
+            chunk = &state.chunks.back();
+        }
 
-        // NPCs
         for (const auto& npc : ed.npcs) {
-            GameState::NpcSave ns;
-            ns.x = npc.x();
-            ns.y = npc.y();
-            ns.glyph = npc.glyph();
-            ns.fg_r = npc.fg_r();
-            ns.fg_g = npc.fg_g();
-            ns.fg_b = npc.fg_b();
-            ns.name = npc.name();
-            ns.is_merchant = npc.is_merchant();
-            ns.affinity = npc.affinity();
-            ns.shop_inventory = npc.shop_inventory();
-            cs->npcs.push_back(ns);
+            GameState::NpcSave saved;
+            saved.x = npc.x();
+            saved.y = npc.y();
+            saved.name = npc.name();
+            saved.affinity = npc.affinity();
+            saved.shop_inventory = npc.shop_inventory();
+            chunk->npcs.push_back(std::move(saved));
         }
-        // Enemies
-        for (const auto& e : ed.enemies) {
-            GameState::EnemySave es;
-            es.x = e.x();
-            es.y = e.y();
-            es.glyph = e.glyph();
-            es.fg_r = e.fg_r();
-            es.fg_g = e.fg_g();
-            es.fg_b = e.fg_b();
-            es.name = e.name();
-            es.hp = e.hp();
-            es.max_hp = e.max_hp();
-            es.attack = e.attack();
-            es.defense = e.defense();
-            es.damage_variance = e.damage_variance();
-            es.xp_value = e.xp_value();
-            cs->enemies.push_back(es);
+        for (const auto& enemy : ed.enemies) {
+            GameState::EnemySave saved;
+            saved.x = enemy.x();
+            saved.y = enemy.y();
+            saved.name = enemy.name();
+            saved.hp = enemy.hp();
+            chunk->enemies.push_back(std::move(saved));
         }
-        // World items
         for (const auto& item : ed.items) {
-            if (!item.in_inventory()) {
-                GameState::WorldItemSave wis;
-                wis.x = item.x();
-                wis.y = item.y();
-                wis.glyph = item.glyph();
-                wis.fg_r = item.fg_r();
-                wis.fg_g = item.fg_g();
-                wis.fg_b = item.fg_b();
-                wis.item_name = item.name();
-                cs->world_items.push_back(wis);
-            }
+            if (item.in_inventory()) continue;
+            GameState::WorldItemSave saved;
+            saved.x = item.x();
+            saved.y = item.y();
+            saved.item_name = item.name();
+            chunk->world_items.push_back(std::move(saved));
         }
     }
 
-    // Meta
     state.meta.character_name = state.player_name;
     state.meta.play_time_seconds = play_time_seconds;
+    state.meta.timestamp = platform::local_timestamp();
     state.turn_of_day = time_system.turn_of_day();
     state.day = time_system.day();
-
-    time_t now = time(nullptr);
-    char buf[64];
-    struct tm time_info;
-    localtime_s(&time_info, &now);
-    strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%S", &time_info);
-    state.meta.timestamp = buf;
 
     return state;
 }
 
-// ── Apply chunk data to world ───────────────────────────────────────
+// ── Apply to world ──────────────────────────────────────────────────
 
 void apply_chunk_data(World& world, const std::vector<GameState::ChunkSave>& chunks) {
-    for (const auto& cs : chunks) {
-        // Apply chunk terrain/explored/mods
-        World::ChunkSaveData data;
-        data.cx = cs.cx;
-        data.cy = cs.cy;
-        data.explored = parse_hex(cs.explored_hex, CHUNK_SIZE * CHUNK_SIZE);
-        data.modifications = cs.modifications;
-        data.placed_objects = cs.placed_objects;
-        world.apply_save_data(data);
+    for (const auto& chunk : chunks) {
+        World::ChunkSaveData terrain;
+        terrain.cx = chunk.cx;
+        terrain.cy = chunk.cy;
+        terrain.explored = parse_hex(chunk.explored_hex, CHUNK_SIZE * CHUNK_SIZE);
+        terrain.modifications = chunk.modifications;
+        terrain.placed_objects = chunk.placed_objects;
+        world.apply_save_data(terrain);
 
-        // Apply per-chunk entities
-        for (const auto& ns : cs.npcs) {
-            world.spawn_npc(Npc(ns.x, ns.y, ns.glyph, ns.name,
-                                ns.fg_r, ns.fg_g, ns.fg_b,
-                                ns.is_merchant, ns.affinity,
-                                dialogue_for_name(ns.name), ns.shop_inventory));
+        World::ChunkEntitySaveData entities;
+        entities.cx = chunk.cx;
+        entities.cy = chunk.cy;
+
+        // Rebuild from the archetype databases so stats, colours, dialogue and
+        // loot tables always match the current definitions.
+        for (const auto& saved : chunk.npcs) {
+            Npc npc = make_npc(saved.name, saved.x, saved.y);
+            npc.set_affinity(saved.affinity);
+            npc.set_shop_inventory(saved.shop_inventory);
+            entities.npcs.push_back(std::move(npc));
         }
-        for (const auto& es : cs.enemies) {
-            Enemy e(es.x, es.y, es.glyph, es.name,
-                    es.fg_r, es.fg_g, es.fg_b,
-                    es.hp, es.max_hp, es.attack, es.defense,
-                    es.damage_variance, es.xp_value);
-            e.assign_default_drops(); // drops are not serialized; restore by name
-            world.spawn_enemy(std::move(e));
+        for (const auto& saved : chunk.enemies) {
+            Enemy enemy = make_enemy(saved.name, saved.x, saved.y);
+            enemy.set_hp(saved.hp);
+            entities.enemies.push_back(std::move(enemy));
         }
-        for (const auto& wis : cs.world_items) {
-            Entity e(wis.x, wis.y, wis.glyph, wis.item_name,
-                     wis.fg_r, wis.fg_g, wis.fg_b);
-            e.set_is_item(true);
-            world.spawn_item(std::move(e));
+        for (const auto& saved : chunk.world_items) {
+            const Item* item = find_item(saved.item_name);
+            if (!item) continue;
+            Entity dropped(saved.x, saved.y, item->glyph(), item->name(),
+                           item->fg_r(), item->fg_g(), item->fg_b());
+            dropped.set_is_item(true);
+            entities.items.push_back(std::move(dropped));
         }
+
+        world.apply_entity_save_data(entities);
     }
 }
