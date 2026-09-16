@@ -49,7 +49,7 @@ Comprehensive design reference for ASCII Game. Updated as systems are implemente
 Items stack if they share the same `name` AND `type`.
 Inventory is stored as `vector<pair<Item, int>>` where int is stack count.
 
-### Item Database (current, 35 items)
+### Item Database (current, 40 items)
 | Item | Type | Slot | Weight | Value | Atk | Def | Variance | Effect |
 |---|---|---|---|---|---|---|---|---|
 | Bread | Consumable | - | 1 | 2 | - | - | - | Feed +10 |
@@ -315,6 +315,12 @@ Trees are reconstructed on load by name lookup.
 - 61-80: Trusting (talks, accepts gifts, trades if merchant)
 - 81-100: Devoted (special dialogue, future romance option)
 
+Enforced by `Npc::can_talk()`, `can_gift()` and `can_trade()`; the thresholds
+themselves are `Npc::HOSTILE_MAX` and friends. A refused option says so in the
+message log rather than silently doing nothing, and the dialogue header shows
+the band's name (`Npc::affinity_label()`) next to the number so the player can
+see where they stand before trying.
+
 ### Affinity Changes
 - Gift (Love): +15
 - Gift (Like): +8
@@ -375,21 +381,44 @@ Two-panel overlay:
 
 ## Save/Load System ✅
 
-### What gets saved
+### What gets saved (v7)
+
+Only what generation cannot reproduce. Terrain comes back from the seed, and
+entity stats come back from their archetype factory, so neither is stored.
+
 - Player: position, HP, XP, level, gold, inventory, equipment, stats
-- Map: tile grid, explored tiles (hex bitfield), map seed
-- NPCs: position, glyph, colors, name, affinity, is_merchant, shop inventory, dialogue tree name
-- Enemies: position, glyph, colors, name, HP, max HP, attack, defense, damage_variance, xp_value
-- World items: position, item name, glyph, colors
-- Meta: play time
+- World: seed, and per-chunk explored bits (hex bitfield), player tile deltas
+  and player-placed objects
+- RNG: the action generator's state, so a reloaded game continues the same
+  sequence of rolls
+- NPCs: position, name, affinity, current shop stock. Glyph, colours, merchant
+  flag and dialogue tree are rebuilt by `make_npc(name)`.
+- Enemies: position, name, current HP. Everything else is rebuilt by
+  `make_enemy(name)`.
+- World items: position and item name; the rest comes from the item database
+- Zones: world-space rectangles and types
+- Time: turn of day, day counter
+- Meta: character name, play time, timestamp, level, day
 
 ### Save file format
-- JSON, one file per slot: `%APPDATA%/AsciiGame/saves/slot_N.json`
+- JSON, one file per slot: `slot_N.json` under the user data directory
+  (`%APPDATA%/AsciiGame/saves` on Windows, `$XDG_DATA_HOME/AsciiGame/saves` or
+  `~/.local/share/AsciiGame/saves` elsewhere). `ASCII_GAME_DATA_DIR` overrides
+  the root, which is how the tests stay out of a real player's data.
 - 8 save slots
-- Version field for forward compatibility
-- Explored tiles encoded as hex bitfield (compact)
-- Map seed saved so terrain is identical on reload
-- NPC dialogue trees reconstructed by name lookup on load
+- Version field for forward compatibility; loading refuses a mismatch rather
+  than misreading it
+- Written through a small `JsonWriter` that owns comma placement, so the
+  output cannot acquire a trailing comma and stop being valid JSON
+- Reads are scoped to the object they belong to, so a field name appearing in
+  two places cannot be picked up from the wrong one
+
+### Why v7 stores so little per entity
+v6 serialised each enemy's stats individually, and the load path passed them
+to the `Enemy` constructor in the wrong order, swapping damage variance with
+XP value. Rebuilding from `make_enemy(name)` and overlaying only the mutable
+state removes the whole class of bug: there is one definition of what a Rat
+is, and the save cannot disagree with it.
 
 ### Key implementation details
 - Equipment JSON uses `[` ... `]` array brackets (not `{` `}`)
@@ -397,6 +426,9 @@ Two-panel overlay:
 - Enemy drops spawn as ground items only (not in player inventory)
 - Enemies stop adjacent to player (BFS targets tile adjacent, not player tile)
 - Player counter-attacks when enemies hit
+- Player HP is restored with `Player::set_hp()`, which clamps to max without
+  going through armour reduction. Stats and equipment are applied first so
+  max HP is final before the clamp.
 
 ---
 
@@ -467,59 +499,133 @@ Pause menu → Settings. Three sliders (left/right adjust):
 - Placed objects (torches, campfires) rendered on the map
 - Origin village is deterministic — regenerated identically on save/load
 
+## Architecture ✅
+
+### Layering
+```
+main.cpp        window/renderer setup, SDL keycode -> ui::Key, the frame loop
+  ui/           presentation and input handling
+  engine/       SDL2 wrappers (Window, Renderer)
+    game/       the simulation. No SDL, no rendering, no input.
+      platform/ filesystem and clock
+```
+
+The rule is one-way: `ui/` and `engine/` may use `game/`, and `game/` uses
+neither. SDL appears only in `engine/`, in the `ui/` files that draw, and in
+`main.cpp`.
+
+### Build targets
+- `ascii_game_core` — everything SDL-free: all of `game/`, `platform/`, and
+  the input and state halves of `ui/`
+- `ascii_game` — `main.cpp`, `engine/`, and the `ui/` drawing code. The only
+  target that needs SDL2.
+- `ascii_game_tests` — links `ascii_game_core`. Configures and runs with no
+  SDL2 installed and no display, which is what makes the logic testable in CI.
+
+### Input
+`ui::Key` names the keys the game reacts to without reference to SDL.
+`main.cpp` maps SDL keycodes onto it, and `ui::handle_key` dispatches to the
+screen that currently owns input. It returns an `InputResult` saying whether
+the player quit, spent a turn, or invalidated visibility, so nothing has to be
+communicated through shared mutable flags. The consequence is that every
+keystroke in the game can be driven from a test.
+
+### Determinism
+One 32-bit world seed drives terrain. The action RNG (`Rng`, xorshift64*) is
+seeded from it, so the same world seed also reproduces combat rolls, AI wander
+and spawn jitter. Its state round-trips through the save file, so a reloaded
+game continues the same sequence rather than diverging. `std::rand` is not
+used anywhere.
+
 ## File Structure (current)
 
 ```
 src/
-  main.cpp              — entry point, main menu, game loop, all overlay UIs (~1700 lines)
+  main.cpp              — setup, SDL keycode mapping, frame loop (~350 lines)
+  platform/
+    paths.h/.cpp        — user data dir, local timestamps, monospace font lookup
   engine/
     window.h/.cpp       — SDL2 window wrapper
-    renderer.h/.cpp     — TrueType font grid renderer
+    renderer.h/.cpp     — TrueType grid renderer; glyphs cached white, tinted per draw
   game/
+    session.h/.cpp      — one playthrough; new game, restore from save, capture for save
+    turn.h/.cpp         — advance the world one player turn
+    rng.h               — seedable xorshift64* PRNG
     tile.h              — TileType enum, Tile struct (incl. player-built tiles)
-    chunk.h/.cpp        — 64x64 tile grid, biome ID, dirty tracking, modification persistence
-    world.h/.cpp        — Chunk manager, coordinate conversion, per-chunk entity storage, zones
+    chunk.h/.cpp        — 64x64 tile grid, biome ID, player tile deltas, placed objects
+    world.h/.cpp        — chunk manager, coordinates, per-chunk entities, zones, archive
     noise.h/.cpp        — Simplex noise (seed-based, deterministic)
     fov.h/.cpp          — FOV raycasting (perception-based radius)
     light.h/.cpp        — BFS flood-fill light propagation from sources
-    time_system.h/.cpp  — Day/night cycle, day counter, ambient light, time display
-    player.h/.cpp       — Player position, stats, inventory, equipment, combat, light source
-    entity.h/.cpp       — Base entity class (world items)
-    npc.h/.cpp          — NPC class, AI, affinity, dialogue, shop, gift personalities
-    item.h/.cpp         — Item class, types, equip slots, 35-item database
+    time_system.h/.cpp  — day/night cycle, day counter, ambient light, time display
+    player.h/.cpp       — position, stats, inventory, equipment, combat, light source
+    entity.h/.cpp       — base entity class (world items)
+    npc.h/.cpp          — NPC AI, affinity gates, shops, gift personalities, make_npc
+    item.h/.cpp         — Item class, types, equip slots, 40-item database
     stats.h             — PlayerStats struct (D&D attributes + perception)
     dialogue.h/.cpp     — DialogueNode tree, 9 NPC dialogue builders, name lookup
-    trade.h/.cpp        — Trade overlay UI
-    enemy.h/.cpp        — Enemy class, BFS chase AI, night predators, make_enemy type DB
-    save.h/.cpp         — JSON save/load (v6), full state restoration, per-chunk entities, zones
+    trade.h/.cpp        — trade state and transactions
+    enemy.h/.cpp        — Enemy BFS chase AI, night predators, make_enemy type DB
+    save.h/.cpp         — JSON save/load (v7), per-chunk state, zones, RNG state
     biome.h/.cpp        — 6 biomes, noise-based selection, per-biome tile generation
     structure.h/.cpp    — 4 structure templates (Village, Cave, Ruins, Dungeon), stamping
-    building.h/.cpp     — Buildables (walls/floors/doors/lights), zone types & colors
+    building.h/.cpp     — buildables (walls/floors/doors/lights), zone types & colors
     crafting.h/.cpp     — 16 recipes, ingredient checking, crafting logic
-    settings.h/.cpp     — Load/render/sim radius settings, JSON persistence
-  assets/fonts/         — .ttf monospace fonts
-  saves/                — save files (created at runtime)
+    settings.h/.cpp     — load/render/sim radius settings, JSON persistence
+  ui/
+    key.h               — the keys the game reacts to, named without SDL
+    input.h/.cpp        — every key press, dispatched per screen
+    ui_state.h/.cpp     — interface-only state, menu tables, item actions
+    draw.h/.cpp         — drawing primitives over Renderer
+    world_view.h/.cpp   — terrain, actors, cursors, HUD, message log
+    menus.h/.cpp        — title, pause, settings, save/load and death screens
+    overlays.h/.cpp     — inventory, craft, build, zone, character, map, dialogue
+    trade_view.h/.cpp   — trade panels
+tests/                  — self-registering harness; 129 tests
+assets/fonts/           — .ttf monospace fonts
 ```
+
+---
+
+## Tests ✅
+
+`tests/test_framework.h` is a self-registering `TEST(name)` macro with
+`CHECK`/`CHECK_EQ`/`CHECK_NE`; failures accumulate so one test reports
+everything it finds. No external dependency.
+
+| Suite | Covers |
+|---|---|
+| test_chunk_coords | world-to-chunk conversion, including negative coordinates |
+| test_tile_persistence | generated tiles record no delta, player edits do, and survive unload |
+| test_save_roundtrip | every field of the save, including built terrain and RNG state |
+| test_json_format | the save and settings files are structurally valid JSON |
+| test_entities | make_enemy/make_npc archetypes, affinity thresholds |
+| test_crafting_building | ingredient checks, material consumption, placement rules |
+| test_world_settings | the radius invariants hold for every reachable input |
+| test_turn | enemy AI, combat, loot, XP, simulation-radius gating, list mutation |
+| test_rng | determinism, state round-trip, distribution bounds |
+| test_session | spawn placement, starting kit, seed determinism, capture/restore |
+| test_input | menus, movement, combat, gathering, inventory, build, zones, crafting, affinity gates, trade, overlay cursors |
+
+CI runs the suite under GCC and Clang, again under AddressSanitizer and
+UndefinedBehaviorSanitizer, then builds the game against SDL2. Warnings are
+`-Wall -Wextra -Wshadow -Wnon-virtual-dtor`, promoted to errors in CI.
 
 ---
 
 ## Future Considerations
 
-### Milestone 4C: Biomes & Structures
-- 6+ biomes with noise-based transitions
-- Structure stamps (villages, caves, ruins, dungeons)
-- Biome-dependent terrain generation and enemy spawning
-
-### Milestone 4D: Building System
-- Freeform tile placement mode
-- Zone designation (farm, storage, barracks, bed)
-- Adjustable render/simulation distance settings
+Milestones 4C and 4D are done; see the sections above. What remains:
 
 ### Milestone 5: Survival Systems
-- Zone designation mode (farm, storage, building, bed)
-- NPC settlers who arrive periodically
-- Resource gathering (chop trees, mine stone)
-- Simple construction from materials
+- Hunger/thirst/fatigue meters, status indicators in the HUD
+- Bed and campfire tiles that can be slept in
+- NPC settlers who arrive periodically and work designated zones
+
+Zone designation, resource gathering and construction are already done.
+Settlers need to find and claim zones, so `World`'s zone list will grow an
+assignment side. The meters need a save field and a HUD row, and they tick on
+the turn, which means `resolve_turn` is where they belong.
 
 ### Milestone 6: Romance & Lineage
 - Romance dialogue options (affinity > 80)
@@ -528,6 +634,11 @@ src/
 - Parent death → play as child (optional toggle)
 - Family tree display
 
+Affinity, gift reactions and the Devoted band already exist, and `make_npc` is
+the single place NPC definitions live, so romance can hang off both. Playing
+as a child means a `Session` can outlive a `Player`, which the current split
+already allows.
+
 ### Milestone 7: Character Creator
 - Background selection (Warrior, Scholar, Rogue, Noble, Outlander)
 - Background-specific stat spreads (primary stat determinant)
@@ -535,12 +646,14 @@ src/
 - Scenario intro text per background
 - Custom name input
 
+`session_start` already owns stat defaults and the starting kit, so a
+background is a table it consults rather than a new code path. The creator
+itself is another `GameMode` plus an `ui/overlays` screen.
+
 ### Enchantments (post-Milestone 3)
 - Items can have modifiers (+1, +2, etc.)
 - Different name → separate stack
 - Procedurally generated or found as loot
 
-### Crafting (Milestone 5)
-- Materials (wood, stone, ore) used in construction
-- Recipe system for combining items
-- Crafting stations
+Note that save v7 rebuilds items from the database by name, so a generated
+item would need either a name that round-trips or its own serialisation.
