@@ -1,9 +1,9 @@
 #pragma once
 
 #include "game/item.h"
-#include "game/player.h"
 #include "game/npc.h"
-#include "engine/renderer.h"
+#include "game/player.h"
+#include "ui/key.h"
 #include <string>
 
 struct TradeState {
@@ -22,8 +22,14 @@ struct TradeState {
 void trade_open(TradeState& state, Npc* merchant);
 void trade_close(TradeState& state);
 
-// Returns true if an action was taken (consumes a turn)
-bool trade_handle_input(TradeState& state, SDL_Keycode key, Player& player);
+void trade_handle_input(TradeState& state, ui::Key key, Player& player);
 
-void trade_render(TradeState& state, const Player& player,
-                  Renderer& renderer, int view_cols, int view_rows);
+// Age the transaction message by a frame. Called from the frame loop rather
+// than from the input handler, which only runs on a key press and so left
+// messages on screen indefinitely.
+void trade_tick(TradeState& state);
+
+// Prices are shown in the panels and charged on confirmation, so the view and
+// the transaction have to agree on them.
+int trade_buy_price(const Item& item);
+int trade_sell_price(const Item& item);

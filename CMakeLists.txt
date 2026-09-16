@@ -13,6 +13,8 @@ option(ASCII_GAME_WERROR "Treat compiler warnings as errors" OFF)
 # without a window or a font.
 add_library(ascii_game_core STATIC
     src/platform/paths.cpp
+    src/game/session.cpp
+    src/game/trade.cpp
     src/game/player.cpp
     src/game/entity.cpp
     src/game/fov.cpp
@@ -32,6 +34,8 @@ add_library(ascii_game_core STATIC
     src/game/building.cpp
     src/game/crafting.cpp
     src/game/settings.cpp
+    src/ui/ui_state.cpp
+    src/ui/input.cpp
 )
 
 target_include_directories(ascii_game_core PUBLIC ${CMAKE_SOURCE_DIR}/src)
@@ -53,8 +57,9 @@ target_compile_options(ascii_game_core PRIVATE ${ASCII_GAME_WARNINGS})
 
 # ── Game executable ───────────────────────────────────────────────────
 #
-# Only the executable needs SDL2. It is looked up without REQUIRED so the test
-# suite still configures and runs on a machine with no SDL2 and no display.
+# Only the executable needs SDL2: the drawing code talks to Renderer, which
+# wraps it. SDL2 is looked up without REQUIRED so the test suite still
+# configures and runs on a machine with no SDL2 and no display.
 
 find_package(PkgConfig)
 if(PkgConfig_FOUND)
@@ -76,7 +81,11 @@ if(ASCII_GAME_HAVE_SDL2)
         src/main.cpp
         src/engine/window.cpp
         src/engine/renderer.cpp
-        src/game/trade.cpp
+        src/ui/draw.cpp
+        src/ui/world_view.cpp
+        src/ui/menus.cpp
+        src/ui/overlays.cpp
+        src/ui/trade_view.cpp
     )
 
     target_compile_options(ascii_game PRIVATE ${ASCII_GAME_WARNINGS})
