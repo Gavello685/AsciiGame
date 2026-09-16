@@ -32,6 +32,11 @@ bool Window::init(const WindowConfig& config) {
     return true;
 }
 
+void Window::on_resized(int w, int h) {
+    if (w > 0) width_ = w;
+    if (h > 0) height_ = h;
+}
+
 void Window::shutdown() {
     if (window_) {
         SDL_DestroyWindow(window_);

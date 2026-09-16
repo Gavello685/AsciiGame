@@ -47,14 +47,13 @@ void Renderer::shutdown() {
     TTF_Quit();
 }
 
-SDL_Texture* Renderer::get_glyph_texture(uint32_t glyph, uint8_t r, uint8_t g, uint8_t b) {
-    GlyphKey key{glyph, r, g, b};
-    auto it = glyph_cache_.find(key);
+SDL_Texture* Renderer::get_glyph_texture(uint32_t glyph) {
+    auto it = glyph_cache_.find(glyph);
     if (it != glyph_cache_.end()) return it->second;
 
-    SDL_Color fg = {r, g, b, 255};
+    SDL_Color white = {255, 255, 255, 255};
     std::string s(1, static_cast<char>(glyph));
-    SDL_Surface* surf = TTF_RenderText_Blended(font_, s.c_str(), fg);
+    SDL_Surface* surf = TTF_RenderText_Blended(font_, s.c_str(), white);
     if (!surf) return nullptr;
 
     SDL_Texture* tex = SDL_CreateTextureFromSurface(renderer_, surf);
@@ -62,7 +61,7 @@ SDL_Texture* Renderer::get_glyph_texture(uint32_t glyph, uint8_t r, uint8_t g, u
     if (!tex) return nullptr;
 
     SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_BLEND);
-    glyph_cache_[key] = tex;
+    glyph_cache_[glyph] = tex;
     return tex;
 }
 
@@ -114,10 +113,11 @@ void Renderer::render_grid() {
             SDL_SetRenderDrawColor(renderer_, cell.bg_r, cell.bg_g, cell.bg_b, 255);
             SDL_RenderFillRect(renderer_, &dest);
 
-            // Draw glyph from cache
+            // Draw glyph from cache, tinted to the cell's foreground colour
             if (cell.glyph != ' ') {
-                SDL_Texture* tex = get_glyph_texture(cell.glyph, cell.fg_r, cell.fg_g, cell.fg_b);
+                SDL_Texture* tex = get_glyph_texture(cell.glyph);
                 if (tex) {
+                    SDL_SetTextureColorMod(tex, cell.fg_r, cell.fg_g, cell.fg_b);
                     SDL_RenderCopy(renderer_, tex, nullptr, &dest);
                 }
             }

@@ -12,28 +12,16 @@ struct Cell {
     uint8_t bg_r = 0, bg_g = 0, bg_b = 0;
 };
 
-struct GlyphKey {
-    uint32_t glyph;
-    uint8_t r, g, b;
-    bool operator==(const GlyphKey& o) const {
-        return glyph == o.glyph && r == o.r && g == o.g && b == o.b;
-    }
-};
-
-struct GlyphHash {
-    size_t operator()(const GlyphKey& k) const {
-        size_t h = std::hash<uint32_t>()(k.glyph);
-        h ^= std::hash<uint8_t>()(k.r) << 1;
-        h ^= std::hash<uint8_t>()(k.g) << 2;
-        h ^= std::hash<uint8_t>()(k.b) << 3;
-        return h;
-    }
-};
-
 class Renderer {
 public:
     Renderer();
     ~Renderer();
+
+    // Owns an SDL_Renderer, a TTF_Font and a texture cache.
+    Renderer(const Renderer&) = delete;
+    Renderer& operator=(const Renderer&) = delete;
+    Renderer(Renderer&&) = delete;
+    Renderer& operator=(Renderer&&) = delete;
 
     bool init(SDL_Window* window, const std::string& font_path, int font_size);
     void shutdown();
@@ -52,7 +40,10 @@ public:
     int cell_height() const { return cell_h_; }
 
 private:
-    SDL_Texture* get_glyph_texture(uint32_t glyph, uint8_t r, uint8_t g, uint8_t b);
+    // Glyphs are cached white and tinted per draw with SDL_SetTextureColorMod.
+    // Keying the cache on colour as well meant one texture per glyph/colour
+    // pair, which grows without bound once cells are shaded by light level.
+    SDL_Texture* get_glyph_texture(uint32_t glyph);
 
     SDL_Renderer* renderer_ = nullptr;
     TTF_Font* font_ = nullptr;
@@ -61,5 +52,5 @@ private:
     int grid_w_ = 0;
     int grid_h_ = 0;
     std::vector<Cell> cells_;
-    std::unordered_map<GlyphKey, SDL_Texture*, GlyphHash> glyph_cache_;
+    std::unordered_map<uint32_t, SDL_Texture*> glyph_cache_;
 };
