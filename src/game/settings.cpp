@@ -1,16 +1,12 @@
 #include "game/settings.h"
+#include "platform/paths.h"
+#include <cctype>
 #include <fstream>
-#include <sstream>
-#include <filesystem>
-#include <cstdlib>
+#include <iterator>
 #include <string>
 
-namespace fs = std::filesystem;
-
-static fs::path settings_path() {
-    fs::path dir = fs::path(std::getenv("APPDATA")) / "AsciiGame";
-    fs::create_directories(dir);
-    return dir / "settings.json";
+static std::filesystem::path settings_path() {
+    return platform::user_data_dir() / "settings.json";
 }
 
 static int extract_int(const std::string& json, const std::string& key, int def) {
@@ -22,7 +18,10 @@ static int extract_int(const std::string& json, const std::string& key, int def)
     pos++;
     while (pos < json.size() && (json[pos] == ' ' || json[pos] == '\t')) pos++;
     size_t end = pos;
-    while (end < json.size() && (isdigit(json[end]) || json[end] == '-')) end++;
+    while (end < json.size() &&
+           (std::isdigit(static_cast<unsigned char>(json[end])) || json[end] == '-')) {
+        end++;
+    }
     if (end == pos) return def;
     try { return std::stoi(json.substr(pos, end - pos)); } catch (...) { return def; }
 }
