@@ -62,20 +62,22 @@ int Player::find_item(const std::string& name) const {
     return -1;
 }
 
-bool Player::equip(int inventory_index) {
+bool Player::equip(int inventory_index, EquipSlot slot) {
     if (inventory_index < 0 || inventory_index >= static_cast<int>(inventory_.size())) return false;
-    const Item& item = inventory_[inventory_index].first;
+
+    // Copy before unequip: returning the occupant to inventory can
+    // reallocate the vector, and the item is still read afterwards.
+    Item item = inventory_[inventory_index].first;
     if (!item.is_equippable()) return false;
 
-    EquipSlot slot = item.equip_slot();
+    EquipSlot wanted = (slot == EquipSlot::None) ? item.equip_slot() : slot;
+    if (!Item::accepts_slot(item.equip_slot(), wanted)) return false;
 
-    // If slot is occupied, unequip first
-    if (equipment_.count(slot)) {
-        unequip(slot);
+    if (equipment_.count(wanted)) {
+        unequip(wanted);
     }
 
-    // Equip: move from inventory to equipment
-    equipment_[slot] = item;
+    equipment_[wanted] = item;
     remove_item(inventory_index, 1);
     return true;
 }

@@ -581,7 +581,7 @@ src/
     menus.h/.cpp        — title, pause, settings, save/load and death screens
     overlays.h/.cpp     — inventory, craft, build, zone, character, map, dialogue
     trade_view.h/.cpp   — trade panels
-tests/                  — self-registering harness; 129 tests
+tests/                  — self-registering harness; 136 tests
 assets/fonts/           — .ttf monospace fonts
 ```
 

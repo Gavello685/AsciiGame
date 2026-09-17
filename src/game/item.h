@@ -104,6 +104,13 @@ public:
         }
     }
 
+    // True when `target` is this item's named slot or that slot's pair
+    // (a ring on either hand, boots on either foot).
+    static bool accepts_slot(EquipSlot item_slot, EquipSlot target) {
+        if (item_slot == EquipSlot::None || target == EquipSlot::None) return false;
+        return target == item_slot || target == partner_slot(item_slot);
+    }
+
 private:
     std::string name_;
     uint32_t glyph_ = ' ';

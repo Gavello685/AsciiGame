@@ -17,6 +17,7 @@ enum class GameMode : uint8_t {
     Inventory,
     InventoryAction,
     InventoryExamine,
+    EquipSelect,
     GiftSelect,
     Dialogue,
     Dead,
@@ -99,6 +100,11 @@ struct UiState {
     int equip_slot_cursor = 0;
     Item examine_item;
 
+    // EquipSelect: the two slots a paired item may occupy, and which is
+    // highlighted. Unused when the item has only one valid slot.
+    EquipSlot equip_options[2] = {EquipSlot::None, EquipSlot::None};
+    int equip_choice = 0;
+
     // Gifting
     int gift_cursor = 0;
     GameMode gift_return = GameMode::Normal;
@@ -141,6 +147,9 @@ struct UiState {
         inv_cursor = 0;
         inv_action_cursor = 0;
         equip_slot_cursor = 0;
+        equip_options[0] = EquipSlot::None;
+        equip_options[1] = EquipSlot::None;
+        equip_choice = 0;
         gift_cursor = 0;
         craft_cursor = 0;
         build_sel = 0;
@@ -157,6 +166,8 @@ struct UiState {
 extern const EquipSlot EQUIP_SLOTS[];
 extern const char* const EQUIP_SLOT_NAMES[];
 extern const int NUM_EQUIP_SLOTS;
+
+const char* equip_slot_name(EquipSlot slot);
 
 // Menu option labels. Shared between the renderer that lists them and the
 // input handler that bounds the cursor against them, so the two cannot drift

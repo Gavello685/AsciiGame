@@ -92,7 +92,9 @@ public:
     // Equipment
     const std::unordered_map<EquipSlot, Item>& equipment() const { return equipment_; }
 
-    bool equip(int inventory_index);
+    // Move inventory_index onto `slot`. Pass EquipSlot::None to use the
+    // item's named slot. Refuses a slot the item cannot occupy.
+    bool equip(int inventory_index, EquipSlot slot = EquipSlot::None);
     bool unequip(EquipSlot slot);
     void equip_to_slot(EquipSlot slot, const Item& item) { equipment_[slot] = item; }
     bool is_slot_occupied(EquipSlot slot) const { return equipment_.count(slot) > 0; }

@@ -53,6 +53,35 @@ bool has_equipped(const Player& player, const std::string& name) {
     return false;
 }
 
+int slot_order(EquipSlot slot) {
+    for (int i = 0; i < NUM_EQUIP_SLOTS; ++i) {
+        if (EQUIP_SLOTS[i] == slot) return i;
+    }
+    return NUM_EQUIP_SLOTS;
+}
+
+// Fill EquipSelect with the two paired slots, listed in paper-doll order
+// (left before right). Cursor starts on an empty slot if one is free.
+void begin_equip_select(UiState& ui, const Player& player, const Item& item) {
+    EquipSlot primary = item.equip_slot();
+    EquipSlot partner = Item::partner_slot(primary);
+    if (slot_order(primary) <= slot_order(partner)) {
+        ui.equip_options[0] = primary;
+        ui.equip_options[1] = partner;
+    } else {
+        ui.equip_options[0] = partner;
+        ui.equip_options[1] = primary;
+    }
+
+    bool first_free = !player.is_slot_occupied(ui.equip_options[0]);
+    bool second_free = !player.is_slot_occupied(ui.equip_options[1]);
+    if (first_free && !second_free) ui.equip_choice = 0;
+    else if (!first_free && second_free) ui.equip_choice = 1;
+    else ui.equip_choice = (ui.equip_options[0] == primary) ? 0 : 1;
+
+    ui.mode = GameMode::EquipSelect;
+}
+
 // Announce a structure the first time the player stands in its chunk.
 void check_discovery(InputContext& ctx) {
     int cx = World::world_to_chunk_x(ctx.session.player.x());
@@ -540,8 +569,10 @@ InputResult apply_item_action(InputContext& ctx, ItemAction action) {
             break;
 
         case ItemAction::Equip: {
-            EquipSlot slot = item.equip_slot();
-            if (player.is_slot_occupied(slot)) player.unequip(slot);
+            if (Item::partner_slot(item.equip_slot()) != EquipSlot::None) {
+                begin_equip_select(ui, player, item);
+                break;
+            }
             player.equip(ui.inv_cursor);
             ui.messages.push("Equipped " + item.name() + ".", 60);
             ui.mode = GameMode::Inventory;
@@ -582,6 +613,34 @@ InputResult handle_inventory(InputContext& ctx, Key key) {
 
     if (ui.mode == GameMode::InventoryExamine) {
         if (confirms(key) || key == Key::Escape) ui.mode = GameMode::Inventory;
+        return out;
+    }
+
+    if (ui.mode == GameMode::EquipSelect) {
+        if (key == Key::Escape) {
+            ui.mode = GameMode::InventoryAction;
+            return out;
+        }
+        if (key == Key::Up || key == Key::Left) ui.equip_choice = 0;
+        if (key == Key::Down || key == Key::Right) ui.equip_choice = 1;
+        if (!confirms(key)) return out;
+
+        if (ui.inv_cursor < 0 ||
+            ui.inv_cursor >= static_cast<int>(player.inventory().size())) {
+            ui.mode = GameMode::Inventory;
+            return out;
+        }
+
+        EquipSlot slot = ui.equip_options[ui.equip_choice];
+        Item item = player.inventory_item(ui.inv_cursor);
+        if (!player.equip(ui.inv_cursor, slot)) {
+            ui.mode = GameMode::Inventory;
+            return out;
+        }
+        ui.messages.push("Equipped " + item.name() + " (" +
+                         equip_slot_name(slot) + ").", 60);
+        ui.mode = GameMode::Inventory;
+        clamp_inventory_cursor(ui, player);
         return out;
     }
 
@@ -922,6 +981,7 @@ InputResult handle_key(InputContext& ctx, Key key) {
         case GameMode::Inventory:
         case GameMode::InventoryAction:
         case GameMode::InventoryExamine:
+        case GameMode::EquipSelect:
             return handle_inventory(ctx, key);
         case GameMode::Normal:    return handle_normal(ctx, key);
         default:

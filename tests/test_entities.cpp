@@ -1,7 +1,9 @@
 #include "test_framework.h"
 
 #include "game/enemy.h"
+#include "game/item.h"
 #include "game/npc.h"
+#include "game/player.h"
 #include "game/world.h"
 
 // make_enemy and make_npc are the single source of truth for archetype stats.
@@ -155,4 +157,47 @@ TEST(village_spawns_its_settlement_npcs) {
         }
     }
     CHECK(found > 0);
+}
+
+TEST(player_equip_accepts_the_partner_slot) {
+    Player player;
+    const Item* sword = find_item("Iron Sword");
+    CHECK(sword != nullptr);
+    if (!sword) return;
+    player.add_item(*sword);
+
+    CHECK(player.equip(0, EquipSlot::Hand_R));
+    CHECK(player.equipped_at(EquipSlot::Hand_R) != nullptr);
+    CHECK(player.equipped_at(EquipSlot::Hand_L) == nullptr);
+    CHECK(!player.has_item("Iron Sword"));
+}
+
+TEST(player_equip_rejects_an_unrelated_slot) {
+    Player player;
+    const Item* sword = find_item("Iron Sword");
+    CHECK(sword != nullptr);
+    if (!sword) return;
+    player.add_item(*sword);
+
+    CHECK(!player.equip(0, EquipSlot::Head));
+    CHECK(player.has_item("Iron Sword"));
+    CHECK(player.equipped_at(EquipSlot::Head) == nullptr);
+}
+
+TEST(player_equip_copies_before_displacing_the_occupant) {
+    // unequip() can reallocate the inventory vector. The item being equipped
+    // used to be held by reference into that vector.
+    Player player;
+    const Item* sword = find_item("Iron Sword");
+    const Item* torch = find_item("Torch");
+    CHECK(sword != nullptr && torch != nullptr);
+    if (!sword || !torch) return;
+
+    player.add_item(*sword);
+    CHECK(player.equip(0, EquipSlot::Hand_L));
+    player.add_item(*torch);
+    CHECK(player.equip(0, EquipSlot::Hand_L));
+
+    CHECK_EQ(player.equipped_at(EquipSlot::Hand_L)->name(), std::string("Torch"));
+    CHECK(player.has_item("Iron Sword"));
 }

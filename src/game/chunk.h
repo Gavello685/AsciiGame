@@ -55,7 +55,9 @@ public:
     bool is_passable(int local_x, int local_y) const;
     bool is_opaque(int local_x, int local_y) const;
 
-    // Dirty tracking
+    // True once a player edit or placed object has touched this chunk.
+    // Persistence does not key off this: World archives every visited chunk
+    // so explored tiles survive even when nothing was built.
     bool is_dirty() const { return dirty_; }
     void mark_dirty() { dirty_ = true; }
     bool is_visited() const { return visited_; }
