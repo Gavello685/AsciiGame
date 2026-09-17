@@ -135,4 +135,171 @@ Cross-session notes for tracking progress, decisions, and context.
 
 ---
 
-## Session 4 (Next): 4C Biomes & Structures
+## Session 4: 4C Biomes & Structures ✅
+## Session 5: 4D Building, Zones, Crafting, Settings, Main Menu ✅
+
+Both delivered as described in PLAN.md. See DESIGN.md for the resulting
+systems; the notes below pick up from the audit that followed.
+
+---
+
+## Session 6: 4E Correctness & Structure ✅
+
+An audit of the codebase found data-loss and memory-safety bugs, documented
+behaviour that was never wired up, and a 2000-line `main.cpp` with nothing in
+it reachable from a test. This session fixed the bugs, implemented the
+documented behaviour, and split the code so the simulation can be tested
+without a window.
+
+### Bugs fixed
+
+**Player edits vanished when a chunk unloaded.** `Chunk::set()` was used both
+by world generation and by player building, and generation's writes were
+recorded as deltas alongside the player's. Split into `set_generated()` (no
+delta) and `modify()` (records a delta, marks the chunk dirty). `World` gained
+a `ChunkArchive` holding what generation cannot reproduce — explored bits,
+tile deltas, player-placed objects and live entities — archived on unload and
+replayed on load. Repeated edits to one tile now overwrite rather than
+accumulate.
+
+**Enemy stats were corrupted by loading.** The v6 load path passed
+`damage_variance` and `xp_value` to the `Enemy` constructor in swapped
+positions. Rather than fix the call, save v7 rebuilds entities from
+`make_enemy(name)` / `make_npc(name)` and stores only mutable state. There is
+now one definition of what a Rat is and the save cannot disagree with it.
+
+**Saves could be invalid JSON.** Serialisation emitted a trailing comma after
+the equipment array. Replaced the ad-hoc string building with a `JsonWriter`
+that owns comma placement, and added `tests/json_validator.h` plus a suite
+that parses what the game writes.
+
+**Use-after-free in the enemy turn loop.** The loop walked a `vector<Enemy*>`
+snapshot while removing dead enemies and spawning loot, invalidating the
+pointers behind it. `World` now exposes indexed per-chunk access
+(`enemy_count_in_chunk`, `enemy_in_chunk`, `erase_enemy_in_chunk`) and
+`resolve_turn` re-fetches each pointer per step. The bulk `get_all_enemies()`
+accessors are gone, so the unsafe pattern is no longer reachable.
+
+**Use-after-free in trade and inventory.** Both held `const Item&` into the
+inventory, then removed the stack, then read the item's name for a status
+message. All such paths now copy the `Item` first. `Npc::shop_item_at()`
+returns by value for the same reason.
+
+**HP came back wrong from a save.** Loading called
+`take_damage(max_hp - saved_hp)`, which applied armour reduction, so an
+armoured character loaded with more HP than they saved. Added
+`Player::set_hp()`, which clamps to `[0, max_hp]` directly. Stats and
+equipment are applied before it so max HP is final.
+
+**Settings could be driven invalid.** The radius setters clamped in cascade,
+so the UI could reach `render_radius` 0 or `sim_radius` -1. Rewrote them
+around a `reconcile_radii()` that enforces `2 <= load <= 4`,
+`1 <= render <= load - 1`, `1 <= sim <= render`. The shipped defaults
+(load 2, render 2) violated the invariants and silently shrank render
+distance at startup; now 3/2/1.
+
+**Portability.** `std::getenv("APPDATA")` was dereferenced unchecked, and
+`localtime_s` is Windows-only. Both moved behind `platform/paths`, which also
+gained `find_monospace_font()` so the renderer no longer hard-codes
+`C:/Windows/Fonts/cour.ttf`.
+
+**Renderer demanded acceleration.** `SDL_CreateRenderer` was called with
+`SDL_RENDERER_ACCELERATED` only, so the game exited at startup on any machine
+with no usable GPU driver. A grid of glyphs costs nothing to draw, so it now
+falls back to `SDL_RENDERER_SOFTWARE`, which is what makes the `--demo` run
+work headless.
+
+**Undefined behaviour.** `StructureEntity::type` was a `const char*` compared
+with `==` against string literals. Now a `StructureEntityKind` enum.
+
+**Rule of three.** `Window` and `Renderer` own raw SDL pointers and had
+implicit copy operations. Copies and moves are deleted.
+
+**Resize was ignored.** The window is `SDL_WINDOW_RESIZABLE` but
+`SDL_WINDOWEVENT_SIZE_CHANGED` was unhandled, so the layout kept using the
+startup size. Added `Window::on_resized()`.
+
+### Documented behaviour that was missing
+
+- **Light levels were computed and discarded.** `light::compute` filled
+  `Tile::light_level` and rendering never read it. Visible tiles are now
+  shaded by it (`light_shade()`), so a lit room reads differently from one lit
+  only by the player's torch. Actors keep full colour so they stay readable.
+- **FOV ignored its formula.** PLAN.md 4B specifies base 8 plus `(WIS-10)/2`
+  scaled by ambient light. Implemented, with a floor of torch radius + 2 so
+  the player is never blind.
+- **Affinity gated nothing.** DESIGN.md's five bands existed only as prose.
+  `Npc::can_talk/can_gift/can_trade` implement them, refusals are reported in
+  the log, and the dialogue header shows the band name.
+- **Simulation distance did nothing.** All loaded chunks were stepped every
+  turn. `resolve_turn` now skips chunks outside the simulation radius, so the
+  setting bounds per-turn cost as documented.
+
+### Determinism
+
+`std::rand()` drove combat rolls, AI wander and spawn jitter, which
+contradicted the seed-reproducible world PLAN.md describes. Added `Rng`
+(xorshift64*), seeded from the map seed, with its state saved and restored.
+Same seed, same run.
+
+### Structure
+
+`main.cpp` went from 2000 lines to ~350. Split along the SDL boundary:
+
+| Module | Contents |
+|---|---|
+| `game/session` | one playthrough; new game, restore from save, capture for save |
+| `game/turn` | advance the world one player turn |
+| `ui/key` | the keys the game reacts to, named without SDL |
+| `ui/input` | every key press, dispatched per screen |
+| `ui/ui_state` | interface-only state, menu tables, item actions |
+| `ui/draw` | drawing primitives over Renderer |
+| `ui/world_view` | terrain, actors, cursors, HUD, message log |
+| `ui/menus` | title, pause, settings, save/load and death screens |
+| `ui/overlays` | inventory, craft, build, zone, character, map, dialogue |
+| `ui/trade_view` | trade panels, split out of `game/trade` |
+
+`game/`, `platform/` and the SDL-free half of `ui/` build into
+`ascii_game_core`; only `main.cpp`, `engine/` and the drawing code need SDL2.
+That is what lets the test suite configure and run with no SDL2 installed and
+no display.
+
+`ui::handle_key` returns an `InputResult` (`quit`, `took_turn`, `fov_dirty`)
+instead of writing to shared flags, so the frame loop reads as a sequence of
+steps rather than a scan for mutated locals.
+
+### Key architecture decisions
+
+- Dependencies are one-way: `ui/` and `engine/` may use `game/`; `game/` uses
+  neither. Enforced by the fact that `game/` compiles into a library with no
+  SDL include path.
+- Entity definitions live in exactly one place (`make_npc`, `make_enemy`), and
+  the save format defers to them.
+- Terrain is never serialised, only deviations from what the seed produces.
+- Input is expressed in the game's own key vocabulary, so the whole input
+  layer is testable and SDL stays at the edge.
+
+### Tests and CI
+
+129 tests across 11 suites, from 0. The two largest are `test_input`, which
+drives menus, movement, combat, gathering, inventory, building, zoning,
+crafting, the affinity gates, trade and the overlay cursors through
+`handle_key`, and `test_save_roundtrip`, which asserts every field survives a
+save and reload. CI builds under GCC and Clang, runs the suite again under
+ASan and UBSan, and builds the game against SDL2. Warnings are
+`-Wall -Wextra -Wshadow -Wnon-virtual-dtor`, promoted to errors in CI.
+
+### What still needs doing
+
+- The inventory equip path ignores `Item::partner_slot()`, so a two-slot item
+  (a ring, say) always takes the slot named in the database rather than asking
+  which hand. DESIGN.md describes an EquipSelect step that does not exist.
+- `Torch` is documented as burning out; it does not.
+- `Chunk::dirty()` is tracked but nothing reads it — the archive keys off
+  whether a chunk was visited instead.
+- The build panel's material column shows counts without names, which is
+  cryptic when a buildable needs two materials.
+
+---
+
+## Session 7 (Next): Milestone 5 Settlement

@@ -8,6 +8,7 @@
 
 class World;
 class Enemy;
+class Rng;
 
 // Create an enemy of a known type with default stats and drops.
 // Unknown names produce a Rat.
@@ -39,6 +40,7 @@ public:
     uint8_t fg_b() const { return fg_b_; }
 
     int hp() const { return hp_; }
+    void set_hp(int v);
     int max_hp() const { return max_hp_; }
     int attack() const { return attack_; }
     int defense() const { return defense_; }
@@ -47,7 +49,6 @@ public:
 
     bool is_alive() const { return hp_ > 0; }
     void take_damage(int damage);
-    bool check_death();
 
     const std::vector<std::pair<Item, int>>& drops() const { return drops_; }
 
@@ -55,17 +56,14 @@ public:
     // Derived from name so no extra save data is needed.
     bool night_predator() const;
 
-    // Restore default loot drops for this enemy's type (used on load,
-    // since drops are not serialized).
-    void assign_default_drops();
-
-    void update(World& world, int player_x, int player_y);
+    void update(World& world, int player_x, int player_y, Rng& rng);
 
     bool can_move_to(int x, int y, const World& world) const;
 
 private:
     void chase_player(int player_x, int player_y, World& world);
-    void wander(World& world);
+    void wander(World& world, Rng& rng);
+    void pick_wander_direction(Rng& rng);
 
     int x_ = 0;
     int y_ = 0;

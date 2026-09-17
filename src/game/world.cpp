@@ -16,70 +16,96 @@ void World::update_loaded_chunks(int player_world_x, int player_world_y) {
     int player_cx = world_to_chunk_x(player_world_x);
     int player_cy = world_to_chunk_y(player_world_y);
 
-    // Generate/load chunks within load radius
     for (int dy = -load_radius_; dy <= load_radius_; ++dy) {
         for (int dx = -load_radius_; dx <= load_radius_; ++dx) {
-            int cx = player_cx + dx;
-            int cy = player_cy + dy;
-            ChunkCoord key{cx, cy};
-            if (chunks_.find(key) == chunks_.end()) {
-                chunks_.emplace(key, Chunk(cx, cy, seed_));
-                Chunk& chunk = chunks_[key];
-                chunk.mark_visited();
-                // Try to place a structure in this chunk
-                bool placed = try_place_structure(chunk, cx, cy, seed_);
-                // The origin chunk always holds a village (deterministic —
-                // guarantees it regenerates identically on save/load)
-                if (!placed && cx == 0 && cy == 0) {
-                    force_place_structure(chunk, 0, 0, StructureType::Village);
-                    spawn_structure_entities(chunk, 0, 0, StructureType::Village);
-                } else if (placed) {
-                    // Determine structure type from biome for entity spawning
-                    BiomeType biome = static_cast<BiomeType>(chunk.biome_id());
-                    float type_noise = noise::fractal2d(
-                        static_cast<float>(cx) * 1.3f + 6000.0f,
-                        static_cast<float>(cy) * 1.3f + 6000.0f,
-                        1, 0.5f);
-                    float type_val = noise::normalize(type_noise);
-                    StructureType stype;
-                    switch (biome) {
-                        case BiomeType::Grassland:
-                            stype = type_val < 0.6f ? StructureType::Village : StructureType::Ruins;
-                            break;
-                        case BiomeType::Forest:
-                            stype = type_val < 0.5f ? StructureType::Ruins : StructureType::Cave;
-                            break;
-                        case BiomeType::Desert: stype = StructureType::Ruins; break;
-                        case BiomeType::Swamp:  stype = StructureType::Ruins; break;
-                        case BiomeType::Mountain:
-                            stype = type_val < 0.6f ? StructureType::Cave : StructureType::Dungeon;
-                            break;
-                        case BiomeType::Tundra: stype = StructureType::Ruins; break;
-                        default: stype = StructureType::None; break;
-                    }
-                    chunk.set_structure_id(static_cast<int>(stype));
-                    spawn_structure_entities(chunk, cx, cy, stype);
-                }
-                // Spawn biome enemies
-                spawn_biome_entities(chunk, cx, cy);
+            ChunkCoord key{player_cx + dx, player_cy + dy};
+            if (chunks_.find(key) != chunks_.end()) continue;
+
+            // Terrain always comes from the seed, so it is regenerated rather
+            // than stored. Only the non-reproducible parts are replayed.
+            chunks_.emplace(key, Chunk(key.x, key.y, seed_));
+            Chunk& chunk = chunks_.at(key);
+            chunk.mark_visited();
+            generate_chunk_contents(key, chunk);
+
+            if (archive_.find(key) != archive_.end()) {
+                restore_chunk(key, chunk);
+            } else {
+                spawn_structure_entities(
+                    key.x, key.y, static_cast<StructureType>(chunk.structure_id()));
+                spawn_biome_entities(chunk, key.x, key.y);
             }
         }
     }
 
-    // Unload chunks beyond load radius + 1 buffer
+    // Unload beyond load radius + 1 buffer, archiving anything generation
+    // cannot rebuild.
     int unload_radius = load_radius_ + 1;
     std::vector<ChunkCoord> to_remove;
     for (const auto& [key, chunk] : chunks_) {
-        int dx = key.x - player_cx;
-        int dy = key.y - player_cy;
-        if (std::abs(dx) > unload_radius || std::abs(dy) > unload_radius) {
+        (void)chunk;
+        if (std::abs(key.x - player_cx) > unload_radius ||
+            std::abs(key.y - player_cy) > unload_radius) {
             to_remove.push_back(key);
         }
     }
     for (const auto& key : to_remove) {
-        clear_entities_in_chunk(key.x, key.y);
+        archive_chunk(key);
+        entities_.erase(key);
         chunks_.erase(key);
     }
+}
+
+// Seed-derived terrain features: structure stamp, structure id, wall torches.
+void World::generate_chunk_contents(ChunkCoord key, Chunk& chunk) {
+    if (try_place_structure(chunk, key.x, key.y, seed_) != StructureType::None) return;
+
+    // The origin chunk always holds a village so a new game has somewhere to
+    // start. Deterministic, so it regenerates identically every load.
+    if (key.x == 0 && key.y == 0) {
+        force_place_structure(chunk, StructureType::Village);
+    }
+}
+
+void World::archive_chunk(ChunkCoord key) {
+    auto chunk_it = chunks_.find(key);
+    if (chunk_it == chunks_.end()) return;
+    const Chunk& chunk = chunk_it->second;
+
+    ChunkArchive& stored = archive_[key];
+    stored.explored = chunk.explored_bits();
+    stored.modifications = chunk.modifications();
+
+    stored.placed_objects.clear();
+    for (const auto& obj : chunk.placed_objects()) {
+        if (obj.player_placed) stored.placed_objects.push_back(obj);
+    }
+
+    auto ent_it = entities_.find(key);
+    if (ent_it != entities_.end()) {
+        stored.entities = ent_it->second;
+    } else {
+        stored.entities = ChunkEntities{};
+    }
+}
+
+void World::restore_chunk_terrain(ChunkCoord key, Chunk& chunk) {
+    const ChunkArchive& stored = archive_.at(key);
+    chunk.mark_visited();
+
+    if (!stored.explored.empty()) chunk.apply_explored(stored.explored);
+    if (!stored.modifications.empty()) chunk.apply_modifications(stored.modifications);
+    for (const auto& obj : stored.placed_objects) chunk.add_placed_object(obj);
+}
+
+void World::restore_chunk(ChunkCoord key, Chunk& chunk) {
+    restore_chunk_terrain(key, chunk);
+    entities_[key] = archive_.at(key).entities;
+}
+
+bool World::is_chunk_known(int cx, int cy) const {
+    ChunkCoord key{cx, cy};
+    return chunks_.find(key) != chunks_.end() || archive_.find(key) != archive_.end();
 }
 
 Chunk* World::get_chunk(int cx, int cy) {
@@ -102,15 +128,6 @@ Tile World::get_tile(int world_x, int world_y) const {
     const Chunk* chunk = get_chunk(cx, cy);
     if (!chunk) return {TileType::None, false, false, 0};
     return chunk->get(lx, ly);
-}
-
-void World::set_tile(int world_x, int world_y, TileType type) {
-    int cx, cy, lx, ly;
-    world_to_chunk(world_x, world_y, cx, cy, lx, ly);
-    Chunk* chunk = get_chunk(cx, cy);
-    if (!chunk) return;
-    chunk->set(lx, ly, type);
-    chunk->mark_dirty();
 }
 
 bool World::in_bounds(int world_x, int world_y) const {
@@ -183,25 +200,32 @@ int World::world_to_chunk_y(int world_y) {
     return (world_y >= 0) ? world_y / CHUNK_SIZE : (world_y - CHUNK_SIZE + 1) / CHUNK_SIZE;
 }
 
+// Invariants (DESIGN.md): 2 <= load <= 4, 1 <= render <= load - 1,
+// 1 <= sim <= render. Every radius stays at least 1; the previous cascading
+// clamps could drive render to 0 and sim to -1 from the settings sliders.
+void World::reconcile_radii() {
+    load_radius_ = std::max(MIN_LOAD_RADIUS, std::min(MAX_LOAD_RADIUS, load_radius_));
+    render_radius_ = std::max(1, std::min(load_radius_ - 1, render_radius_));
+    sim_radius_ = std::max(1, std::min(render_radius_, sim_radius_));
+}
+
 void World::set_load_radius(int r) {
-    load_radius_ = std::max(1, std::min(4, r));
-    // Ensure render and sim fit within load
-    if (render_radius_ >= load_radius_) render_radius_ = load_radius_ - 1;
-    if (sim_radius_ >= render_radius_) sim_radius_ = render_radius_ - 1;
+    load_radius_ = r;
+    reconcile_radii();
 }
 
 void World::set_render_radius(int r) {
-    render_radius_ = std::max(1, std::min(4, r));
-    // Ensure load has room, and sim fits
-    if (load_radius_ <= render_radius_) load_radius_ = render_radius_ + 1;
-    if (sim_radius_ >= render_radius_) sim_radius_ = render_radius_ - 1;
+    render_radius_ = std::max(1, std::min(MAX_LOAD_RADIUS - 1, r));
+    // Growing the render ring grows the load ring to keep it enclosing.
+    load_radius_ = std::max(load_radius_, render_radius_ + 1);
+    reconcile_radii();
 }
 
 void World::set_simulation_radius(int r) {
-    sim_radius_ = std::max(1, std::min(3, r));
-    // Ensure render is at least sim + 1
-    if (render_radius_ <= sim_radius_) render_radius_ = sim_radius_ + 1;
-    if (load_radius_ <= render_radius_) load_radius_ = render_radius_ + 1;
+    sim_radius_ = std::max(1, std::min(MAX_LOAD_RADIUS - 1, r));
+    render_radius_ = std::max(render_radius_, sim_radius_);
+    load_radius_ = std::max(load_radius_, render_radius_ + 1);
+    reconcile_radii();
 }
 
 bool World::is_in_render_range(int world_x, int world_y, int player_wx, int player_wy) const {
@@ -229,7 +253,11 @@ std::vector<ChunkCoord> World::nearby_chunk_keys(int player_wx, int player_wy) c
 }
 
 void World::place_tile(int world_x, int world_y, TileType type) {
-    set_tile(world_x, world_y, type);
+    int cx, cy, lx, ly;
+    world_to_chunk(world_x, world_y, cx, cy, lx, ly);
+    Chunk* chunk = get_chunk(cx, cy);
+    if (!chunk) return;
+    chunk->modify(lx, ly, type);
 }
 
 void World::add_placed_object(int world_x, int world_y, const PlacedObject& obj) {
@@ -240,6 +268,7 @@ void World::add_placed_object(int world_x, int world_y, const PlacedObject& obj)
     PlacedObject local_obj = obj;
     local_obj.local_x = lx;
     local_obj.local_y = ly;
+    local_obj.player_placed = true; // only the build system reaches this path
     chunk->add_placed_object(local_obj);
 }
 
@@ -256,6 +285,9 @@ const PlacedObject* World::placed_object_at(int world_x, int world_y) const {
 
 std::vector<World::ChunkSaveData> World::gather_save_data() const {
     std::vector<ChunkSaveData> result;
+    result.reserve(chunks_.size() + archive_.size());
+
+    // Loaded chunks hold the authoritative state.
     for (const auto& [key, chunk] : chunks_) {
         if (!chunk.is_visited()) continue;
         ChunkSaveData data;
@@ -263,29 +295,41 @@ std::vector<World::ChunkSaveData> World::gather_save_data() const {
         data.cy = key.y;
         data.explored = chunk.explored_bits();
         data.modifications = chunk.modifications();
-        data.placed_objects = chunk.placed_objects();
+        for (const auto& obj : chunk.placed_objects()) {
+            if (obj.player_placed) data.placed_objects.push_back(obj);
+        }
         result.push_back(std::move(data));
     }
+
+    // Chunks the player has left keep their archived state.
+    for (const auto& [key, stored] : archive_) {
+        if (chunks_.find(key) != chunks_.end()) continue;
+        ChunkSaveData data;
+        data.cx = key.x;
+        data.cy = key.y;
+        data.explored = stored.explored;
+        data.modifications = stored.modifications;
+        data.placed_objects = stored.placed_objects;
+        result.push_back(std::move(data));
+    }
+
     return result;
 }
 
 void World::apply_save_data(const ChunkSaveData& data) {
     ChunkCoord key{data.cx, data.cy};
+
+    ChunkArchive& stored = archive_[key];
+    stored.explored = data.explored;
+    stored.modifications = data.modifications;
+    stored.placed_objects = data.placed_objects;
+
+    // If the chunk is already loaded, replay the terrain now; otherwise the
+    // archive entry is picked up the next time it is generated. Entities are
+    // staged separately by apply_entity_save_data.
     auto it = chunks_.find(key);
-    if (it == chunks_.end()) {
-        // Create chunk first, then apply
-        chunks_.emplace(key, Chunk(data.cx, data.cy, seed_));
-        it = chunks_.find(key);
-    }
-    Chunk& chunk = it->second;
-    chunk.mark_visited();
-    chunk.apply_explored(data.explored);
-    if (!data.modifications.empty()) {
-        chunk.apply_modifications(data.modifications);
-    }
-    if (!data.placed_objects.empty()) {
-        chunk.apply_placed_objects(data.placed_objects);
-    }
+    if (it == chunks_.end()) return;
+    restore_chunk_terrain(key, it->second);
 }
 
 // ── Entity management ──────────────────────────────────────────────
@@ -406,33 +450,47 @@ World::NearbyEntities World::get_nearby_entities(int center_wx, int center_wy, i
     return result;
 }
 
-std::vector<Enemy*> World::get_all_enemies() {
-    std::vector<Enemy*> result;
-    for (auto& [key, ce] : entities_) {
-        for (auto& e : ce.enemies) result.push_back(&e);
+std::vector<ChunkCoord> World::entity_chunk_keys() const {
+    std::vector<ChunkCoord> keys;
+    keys.reserve(entities_.size());
+    for (const auto& [key, ce] : entities_) {
+        (void)ce;
+        keys.push_back(key);
     }
-    return result;
+    return keys;
 }
 
-std::vector<Npc*> World::get_all_npcs() {
-    std::vector<Npc*> result;
-    for (auto& [key, ce] : entities_) {
-        for (auto& n : ce.npcs) result.push_back(&n);
-    }
-    return result;
+size_t World::enemy_count_in_chunk(ChunkCoord key) const {
+    auto it = entities_.find(key);
+    return it == entities_.end() ? 0 : it->second.enemies.size();
 }
 
-Npc* World::get_npc_mut(int wx, int wy) {
-    return npc_at(wx, wy);
+Enemy* World::enemy_in_chunk(ChunkCoord key, size_t index) {
+    auto it = entities_.find(key);
+    if (it == entities_.end() || index >= it->second.enemies.size()) return nullptr;
+    return &it->second.enemies[index];
+}
+
+void World::erase_enemy_in_chunk(ChunkCoord key, size_t index) {
+    auto it = entities_.find(key);
+    if (it == entities_.end() || index >= it->second.enemies.size()) return;
+    auto& enemies = it->second.enemies;
+    enemies.erase(enemies.begin() + static_cast<long>(index));
+}
+
+size_t World::npc_count_in_chunk(ChunkCoord key) const {
+    auto it = entities_.find(key);
+    return it == entities_.end() ? 0 : it->second.npcs.size();
+}
+
+Npc* World::npc_in_chunk(ChunkCoord key, size_t index) {
+    auto it = entities_.find(key);
+    if (it == entities_.end() || index >= it->second.npcs.size()) return nullptr;
+    return &it->second.npcs[index];
 }
 
 void World::clear_all_entities() {
     entities_.clear();
-}
-
-void World::clear_entities_in_chunk(int cx, int cy) {
-    ChunkCoord key{cx, cy};
-    entities_.erase(key);
 }
 
 void World::rekey_entities() {
@@ -482,8 +540,10 @@ void World::rekey_entities() {
 
 std::vector<World::ChunkEntitySaveData> World::gather_entity_save_data() const {
     std::vector<ChunkEntitySaveData> result;
-    for (const auto& [key, ce] : entities_) {
-        if (ce.items.empty() && ce.npcs.empty() && ce.enemies.empty()) continue;
+    result.reserve(entities_.size() + archive_.size());
+
+    auto append = [&result](ChunkCoord key, const ChunkEntities& ce) {
+        if (ce.items.empty() && ce.npcs.empty() && ce.enemies.empty()) return;
         ChunkEntitySaveData data;
         data.cx = key.x;
         data.cy = key.y;
@@ -491,17 +551,30 @@ std::vector<World::ChunkEntitySaveData> World::gather_entity_save_data() const {
         data.npcs = ce.npcs;
         data.enemies = ce.enemies;
         result.push_back(std::move(data));
+    };
+
+    for (const auto& [key, ce] : entities_) append(key, ce);
+
+    // Entities in chunks the player has walked away from.
+    for (const auto& [key, stored] : archive_) {
+        if (entities_.find(key) != entities_.end()) continue;
+        append(key, stored.entities);
     }
+
     return result;
 }
 
-void World::apply_entity_save_data(const std::vector<ChunkEntitySaveData>& data) {
-    for (const auto& d : data) {
-        ChunkCoord key{d.cx, d.cy};
-        ChunkEntities& ce = entities_[key];
-        ce.items = d.items;
-        ce.npcs = d.npcs;
-        ce.enemies = d.enemies;
+void World::apply_entity_save_data(const ChunkEntitySaveData& data) {
+    ChunkCoord key{data.cx, data.cy};
+
+    ChunkEntities restored;
+    restored.items = data.items;
+    restored.npcs = data.npcs;
+    restored.enemies = data.enemies;
+
+    archive_[key].entities = restored;
+    if (chunks_.find(key) != chunks_.end()) {
+        entities_[key] = std::move(restored);
     }
 }
 
@@ -592,20 +665,21 @@ void World::spawn_biome_entities(Chunk& chunk, int cx, int cy) {
         noise::fractal2d(static_cast<float>(cx) * 3.0f, static_cast<float>(cy) * 3.0f, 1, 0.5f)) * 3);
 
     for (int i = 0; i < count; ++i) {
-        // Find passable position
-        int ex, ey;
-        int attempts = 0;
-        do {
-            float rx = noise::fractal2d(static_cast<float>(cx) * 5.0f + i * 100.0f + 9000.0f,
-                                         static_cast<float>(cy) * 5.0f + i * 100.0f + 9000.0f, 1, 0.5f);
-            float ry = noise::fractal2d(static_cast<float>(cx) * 5.0f + i * 100.0f + 9500.0f,
-                                         static_cast<float>(cy) * 5.0f + i * 100.0f + 9500.0f, 1, 0.5f);
+        int ex = 0, ey = 0;
+        bool found = false;
+        for (int attempt = 0; attempt < 20 && !found; ++attempt) {
+            // Offset the sample per entity and per attempt, otherwise every
+            // retry evaluates the same coordinate.
+            float jitter = static_cast<float>(i) * 100.0f + static_cast<float>(attempt) * 13.0f;
+            float rx = noise::fractal2d(static_cast<float>(cx) * 5.0f + 9000.0f + jitter,
+                                        static_cast<float>(cy) * 5.0f + 9000.0f + jitter, 1, 0.5f);
+            float ry = noise::fractal2d(static_cast<float>(cx) * 5.0f + 9500.0f + jitter,
+                                        static_cast<float>(cy) * 5.0f + 9500.0f + jitter, 1, 0.5f);
             ex = base_wx + static_cast<int>(noise::normalize(rx) * (CHUNK_SIZE - 4)) + 2;
             ey = base_wy + static_cast<int>(noise::normalize(ry) * (CHUNK_SIZE - 4)) + 2;
-            attempts++;
-        } while ((!is_passable(ex, ey) || has_enemy_at(ex, ey)) && attempts < 20);
-
-        if (attempts >= 20) continue;
+            found = is_passable(ex, ey) && !has_enemy_at(ex, ey);
+        }
+        if (!found) continue;
 
         // Deterministic pick from the biome's spawn table
         float pick = noise::fractal2d(static_cast<float>(cx) * 6.0f + i * 77.0f + 10000.0f,
@@ -617,68 +691,40 @@ void World::spawn_biome_entities(Chunk& chunk, int cx, int cy) {
     }
 }
 
-void World::spawn_structure_entities(Chunk& chunk, int cx, int cy, StructureType stype) {
+void World::spawn_structure_entities(int cx, int cy, StructureType stype) {
+    if (stype == StructureType::None) return;
+
     int base_wx = cx * CHUNK_SIZE;
     int base_wy = cy * CHUNK_SIZE;
 
     const StructureDef& def = structure_def(stype);
 
-    for (const auto& se : def.entities) {
-        int ex, ey;
-        int attempts = 0;
-        do {
-            float rx = noise::fractal2d(static_cast<float>(cx) * 7.0f + 11000.0f + attempts,
-                                         static_cast<float>(cy) * 7.0f + 11000.0f + attempts, 1, 0.5f);
-            float ry = noise::fractal2d(static_cast<float>(cx) * 7.0f + 12000.0f + attempts,
-                                         static_cast<float>(cy) * 7.0f + 12000.0f + attempts, 1, 0.5f);
+    for (size_t i = 0; i < def.entities.size(); ++i) {
+        const StructureEntity& se = def.entities[i];
+
+        int ex = 0, ey = 0;
+        bool found = false;
+        for (int attempt = 0; attempt < 30 && !found; ++attempt) {
+            // Offset the sample per entity and per attempt, otherwise every
+            // retry evaluates the same coordinate.
+            float jitter = static_cast<float>(i) * 31.0f + static_cast<float>(attempt) * 7.0f;
+            float rx = noise::fractal2d(static_cast<float>(cx) * 7.0f + 11000.0f + jitter,
+                                        static_cast<float>(cy) * 7.0f + 11000.0f + jitter, 1, 0.5f);
+            float ry = noise::fractal2d(static_cast<float>(cx) * 7.0f + 12000.0f + jitter,
+                                        static_cast<float>(cy) * 7.0f + 12000.0f + jitter, 1, 0.5f);
             ex = base_wx + static_cast<int>(noise::normalize(rx) * (CHUNK_SIZE - 4)) + 2;
             ey = base_wy + static_cast<int>(noise::normalize(ry) * (CHUNK_SIZE - 4)) + 2;
-            attempts++;
-        } while ((!is_passable(ex, ey) || has_enemy_at(ex, ey) || has_npc_at(ex, ey)) && attempts < 30);
+            found = is_passable(ex, ey) && !has_enemy_at(ex, ey) && !has_npc_at(ex, ey);
+        }
+        if (!found) continue;
 
-        if (attempts >= 30) continue;
-
-        if (se.type == "npc") {
-            auto stock = [&](std::initializer_list<std::pair<const char*, int>> items) {
-                std::vector<std::pair<Item, int>> shop;
-                for (const auto& [n, qty] : items) {
-                    const Item* it = find_item(n);
-                    if (it) shop.emplace_back(*it, qty);
-                }
-                return shop;
-            };
-
-            if (se.name == "Merchant") {
-                spawn_npc(Npc(ex, ey, 'm', "Merchant", 220, 180, 60, true, 60,
-                              build_merchant_dialogue(),
-                              stock({{"Bread", 10}, {"Health Potion", 5}, {"Iron Sword", 3},
-                                     {"Leather Armor", 2}, {"Hood", 3}, {"Torch", 4},
-                                     {"Water Skin", 5}, {"Wooden Shield", 3}})));
-            } else if (se.name == "Villager") {
-                spawn_npc(Npc(ex, ey, 'v', "Villager", 140, 200, 140, false, 30,
-                              build_villager_dialogue(), {}));
-            } else if (se.name == "Guard") {
-                spawn_npc(Npc(ex, ey, 'g', "Guard", 100, 140, 220, false, 40,
-                              build_guard_dialogue(), {}));
-            } else if (se.name == "Blacksmith") {
-                spawn_npc(Npc(ex, ey, 'b', "Blacksmith", 220, 120, 60, true, 50,
-                              build_blacksmith_dialogue(),
-                              stock({{"Iron Sword", 3}, {"Steel Sword", 1}, {"Spear", 3},
-                                     {"Battle Axe", 1}, {"Iron Shield", 2}, {"Steel Shield", 1},
-                                     {"Chain Mail", 1}, {"Steel Helm", 1}, {"Gauntlets", 2},
-                                     {"Woodcutter's Axe", 2}, {"Pickaxe", 2}, {"Iron Rod", 5}})));
-            } else if (se.name == "Farmer") {
-                spawn_npc(Npc(ex, ey, 'f', "Farmer", 100, 180, 80, false, 40,
-                              build_farmer_dialogue(), {}));
-            } else if (se.name == "Herbalist") {
-                spawn_npc(Npc(ex, ey, 'h', "Herbalist", 180, 120, 200, true, 50,
-                              build_herbalist_dialogue(),
-                              stock({{"Health Potion", 8}, {"Greater Health Potion", 2},
-                                     {"Water Skin", 6}, {"Bread", 6}, {"Apple", 8},
-                                     {"Cheese", 4}, {"Cooked Meat", 3}})));
-            }
-        } else if (se.type == "enemy") {
-            spawn_enemy(make_enemy(se.name, ex, ey));
+        switch (se.kind) {
+            case StructureEntityKind::Npc:
+                spawn_npc(make_npc(se.name, ex, ey));
+                break;
+            case StructureEntityKind::Enemy:
+                spawn_enemy(make_enemy(se.name, ex, ey));
+                break;
         }
     }
 }

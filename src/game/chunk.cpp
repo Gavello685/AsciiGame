@@ -22,7 +22,7 @@ Chunk::Chunk(int cx, int cy, uint32_t world_seed)
             BiomeType tile_biome = determine_biome(wx, wy, world_seed);
             TileType type = generate_tile(wx, wy, tile_biome, world_seed);
 
-            set(lx, ly, type);
+            set_generated(lx, ly, type);
         }
     }
 }
@@ -33,9 +33,26 @@ Tile Chunk::get(int local_x, int local_y) const {
     return tiles_[local_y * CHUNK_SIZE + local_x];
 }
 
-void Chunk::set(int local_x, int local_y, TileType type) {
+void Chunk::set_generated(int local_x, int local_y, TileType type) {
     if (!in_bounds(local_x, local_y)) return;
     tiles_[local_y * CHUNK_SIZE + local_x].type = type;
+}
+
+void Chunk::modify(int local_x, int local_y, TileType type) {
+    if (!in_bounds(local_x, local_y)) return;
+    tiles_[local_y * CHUNK_SIZE + local_x].type = type;
+
+    // One delta per tile: repeated edits to the same tile overwrite rather
+    // than accumulate, so the list stays proportional to tiles touched.
+    for (auto& mod : mods_) {
+        if (mod.local_x == local_x && mod.local_y == local_y) {
+            mod.type = type;
+            dirty_ = true;
+            return;
+        }
+    }
+    mods_.push_back({local_x, local_y, type});
+    dirty_ = true;
 }
 
 void Chunk::set_visible(int local_x, int local_y, bool v) {
@@ -85,7 +102,7 @@ void Chunk::remove_placed_object(int local_x, int local_y) {
 
 void Chunk::apply_modifications(const std::vector<TileMod>& mods) {
     for (const auto& mod : mods) {
-        set(mod.local_x, mod.local_y, mod.type);
+        set_generated(mod.local_x, mod.local_y, mod.type);
     }
     mods_ = mods;
 }

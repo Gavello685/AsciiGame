@@ -18,9 +18,14 @@ enum class StructureType : uint8_t {
     StructureCount
 };
 
+enum class StructureEntityKind : uint8_t {
+    Npc,
+    Enemy,
+};
+
 struct StructureEntity {
-    char symbol;
-    const char* type;
+    StructureEntityKind kind;
+    // Archetype name, resolved through make_npc() / make_enemy().
     const char* name;
 };
 
@@ -39,11 +44,13 @@ const StructureDef& structure_def(StructureType type);
 // ungenerated chunks show the same structures they will have when generated.
 StructureType decide_structure(int cx, int cy, BiomeType biome, uint32_t seed);
 
-// Try to place a structure in a chunk (returns true if placed)
-bool try_place_structure(Chunk& chunk, int cx, int cy, uint32_t seed);
+// Place the structure that belongs in this chunk, if any. Stamps tiles, sets
+// the chunk's structure id and adds wall torches. Returns the structure placed,
+// or StructureType::None when the chunk has none.
+StructureType try_place_structure(Chunk& chunk, int cx, int cy, uint32_t seed);
 
-// Force-place a structure in a chunk (always succeeds)
-void force_place_structure(Chunk& chunk, int cx, int cy, StructureType type);
+// Force-place a structure at the centre of a chunk (always succeeds).
+void force_place_structure(Chunk& chunk, StructureType type);
 
 // Stamp structure tiles into chunk at local origin
 void stamp_structure(Chunk& chunk, int origin_lx, int origin_ly, StructureType type);

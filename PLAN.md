@@ -201,9 +201,62 @@ Split into 4 sub-milestones for incremental delivery.
 
 ---
 
+### Sub-milestone 4E: Correctness & Structure ✅
+
+**Goal:** Make the existing systems behave as documented, and make them
+testable, before building more on top of them.
+
+#### New Files
+- [x] `src/game/rng.h` — seedable xorshift64*, replacing `std::rand` so a seed
+      reproduces a whole run and the state can be saved
+- [x] `src/game/turn.h/.cpp` — turn resolution, lifted out of `main.cpp`
+- [x] `src/game/session.h/.cpp` — one playthrough; new game, restore, capture
+- [x] `src/platform/paths.h/.cpp` — user data directory, timestamps, font lookup
+- [x] `src/ui/` — `key`, `input`, `ui_state`, `draw`, `world_view`, `menus`,
+      `overlays`, `trade_view`
+- [x] `tests/` — self-registering harness and 11 suites
+- [x] `.github/workflows/ci.yml` — GCC and Clang, sanitizers, SDL2 build
+
+#### Correctness
+- [x] Player tile edits persist across chunk unload (`Chunk::modify` records a
+      delta, `set_generated` does not; `World` archives what generation cannot
+      reproduce)
+- [x] Save v7 rebuilds entities from archetypes, fixing a constructor argument
+      swap that corrupted enemy stats on load
+- [x] Save output is written through a writer that owns comma placement, so it
+      is always valid JSON
+- [x] Player HP restores without passing through armour reduction
+- [x] Turn resolution re-fetches entities by index instead of walking a
+      snapshot of pointers it then invalidates
+- [x] Trade and inventory copy the `Item` before mutating its container
+- [x] Radius settings cannot be driven into an invalid combination
+- [x] `APPDATA` and `localtime_s` no longer assumed to exist
+- [x] Window resize events are handled
+- [x] `Window` and `Renderer` suppress copies rather than double-freeing
+- [x] Structure entity kinds are an enum, not compared string literals
+
+#### Documented behaviour that was not implemented
+- [x] Per-tile light levels shade the glyph when it is drawn (4B)
+- [x] FOV radius uses the documented formula and scales with ambient light (4B)
+- [x] Affinity thresholds gate talk, gift and trade (DESIGN.md)
+- [x] Simulation distance actually bounds which chunks are stepped (4D)
+
+#### Structure
+- [x] `main.cpp` reduced from 2000 lines to ~350: setup, keycode mapping,
+      frame loop, render dispatch
+- [x] Split along the SDL boundary, so `game/` and the input half of `ui/`
+      link into a library the tests use without a window
+- [x] Font path resolved at runtime instead of hard-coded to Windows
+
+---
+
 ## Milestone 5: Settlement (Revised)
 
 **Goal:** Survival systems + NPC settlers who work designated zones.
+
+Groundwork in place: zones are world-space rectangles on `World` and already
+save; `resolve_turn` is the single place per-turn effects belong, so meters
+tick there; `session_start` owns the starting kit and stat defaults.
 
 ### Tasks
 - [ ] Hunger/thirst meters (deplete every ~50 moves)
@@ -222,6 +275,11 @@ Split into 4 sub-milestones for incremental delivery.
 
 **Goal:** Relationships, marriage, children, generational play.
 
+Groundwork in place: affinity with its five bands, gift reactions per NPC
+personality, and `make_npc` as the single definition of an NPC archetype.
+`Session` owns the `Player` rather than the reverse, so a run can outlive a
+character.
+
 ### Tasks
 - [ ] Relationship system (affinity meter with NPCs)
 - [ ] Gift-giving (give items to increase affinity) — already partially done
@@ -236,6 +294,10 @@ Split into 4 sub-milestones for incremental delivery.
 ## Milestone 7: Character Creator & Scenarios
 
 **Goal:** Player creates a character with a background that shapes stats, starting gear, and opening scenario.
+
+Groundwork in place: `session_start` already decides stats and starting
+inventory, so a background is a table it consults. The creator screen is
+another `GameMode` and an `ui/overlays` entry.
 
 ### Tasks
 - [ ] Background selection screen (Warrior, Scholar, Rogue, Noble, Outlander, etc.)
@@ -274,11 +336,14 @@ Split into 4 sub-milestones for incremental delivery.
 - Explored tiles serialized as hex bitfield (compact)
 - Map seed saved so terrain is identical on reload
 - NPC dialogue trees reconstructed by name lookup on load
+- v7: entities are rebuilt from their archetype factory (`make_npc`,
+  `make_enemy`) and only mutable state is stored, and the action RNG's state
+  round-trips so a reloaded game continues the same sequence
 
 ### Save File Structure
 ```json
 {
-  "version": 2,
+  "version": 7,
   "character": {
     "name": "Player",
     "stats": { "str": 10, "dex": 10, ... },

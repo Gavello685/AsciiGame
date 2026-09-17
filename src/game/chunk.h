@@ -16,12 +16,17 @@ struct TileMod {
 
 // Placed object (torch, campfire, etc.) — stored per chunk
 struct PlacedObject {
-    int local_x, local_y;
-    uint32_t glyph;
+    int local_x = 0, local_y = 0;
+    uint32_t glyph = ' ';
     std::string name;
-    uint8_t fg_r, fg_g, fg_b;
+    uint8_t fg_r = 255, fg_g = 255, fg_b = 255;
     bool is_light = false;
     int light_radius = 0;
+
+    // True for objects the player placed. Structure torches are false: they
+    // come back from seed-driven generation, so persisting them would create
+    // a duplicate at the same tile on every reload.
+    bool player_placed = false;
 };
 
 class Chunk {
@@ -33,7 +38,14 @@ public:
     int cy() const { return cy_; }
 
     Tile get(int local_x, int local_y) const;
-    void set(int local_x, int local_y, TileType type);
+
+    // Terrain write during generation (chunk fill, structure stamping).
+    // Not recorded as a delta: generation is reproducible from the world seed.
+    void set_generated(int local_x, int local_y, TileType type);
+
+    // Terrain write caused by the player (building, gathering).
+    // Recorded as a sparse delta so it survives chunk unload and save/load.
+    void modify(int local_x, int local_y, TileType type);
 
     void set_visible(int local_x, int local_y, bool v);
     void set_explored(int local_x, int local_y, bool v);
@@ -51,7 +63,6 @@ public:
 
     // Modification tracking (for save/load)
     const std::vector<TileMod>& modifications() const { return mods_; }
-    void clear_modifications() { mods_.clear(); dirty_ = false; }
 
     // Placed objects
     const std::vector<PlacedObject>& placed_objects() const { return placed_; }

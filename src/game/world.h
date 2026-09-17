@@ -47,7 +47,6 @@ public:
 
     // World-space tile queries
     Tile get_tile(int world_x, int world_y) const;
-    void set_tile(int world_x, int world_y, TileType type);
     bool in_bounds(int world_x, int world_y) const;
     bool is_passable(int world_x, int world_y) const;
     bool is_opaque(int world_x, int world_y) const;
@@ -63,7 +62,11 @@ public:
     static int world_to_chunk_x(int world_x);
     static int world_to_chunk_y(int world_y);
 
-    // Chunk loading settings
+    // Chunk loading settings.
+    // Invariants: 2 <= load <= 4, 1 <= render <= load - 1, 1 <= sim <= render.
+    static constexpr int MIN_LOAD_RADIUS = 2;
+    static constexpr int MAX_LOAD_RADIUS = 4;
+
     int load_radius() const { return load_radius_; }
     int render_radius() const { return render_radius_; }
     int simulation_radius() const { return sim_radius_; }
@@ -81,7 +84,7 @@ public:
     // Get list of chunk keys near player (for save/load)
     std::vector<ChunkCoord> nearby_chunk_keys(int player_wx, int player_wy) const;
 
-    // Place a tile and mark chunk dirty
+    // Player-caused terrain change. Recorded as a chunk delta so it persists.
     void place_tile(int world_x, int world_y, TileType type);
 
     // Placed objects
@@ -130,24 +133,29 @@ public:
     };
     NearbyEntities get_nearby_entities(int center_wx, int center_wy, int radius_chunks) const;
 
-    // All enemies/NPCs (for iteration like AI update)
-    std::vector<Enemy*> get_all_enemies();
-    std::vector<Npc*> get_all_npcs();
+    // ── Indexed entity access ───────────────────────────────────────
+    //
+    // Turn resolution mutates entity vectors while walking them (enemies die,
+    // loot spawns). Handing out bulk pointer lists made that unsafe, so
+    // callers iterate chunk-by-chunk and re-fetch the pointer each step.
 
-    // Get mutable NPC by position (for trade, dialogue)
-    Npc* get_npc_mut(int wx, int wy);
+    std::vector<ChunkCoord> entity_chunk_keys() const;
+
+    size_t enemy_count_in_chunk(ChunkCoord key) const;
+    Enemy* enemy_in_chunk(ChunkCoord key, size_t index);
+    void erase_enemy_in_chunk(ChunkCoord key, size_t index);
+
+    size_t npc_count_in_chunk(ChunkCoord key) const;
+    Npc* npc_in_chunk(ChunkCoord key, size_t index);
 
     // Clear all entities (used on death/restart)
     void clear_all_entities();
 
-    // Clear entities for a specific chunk (used on chunk unload)
-    void clear_entities_in_chunk(int cx, int cy);
-
     // Fix entities that moved across chunk boundaries during AI update
     void rekey_entities();
 
-    // Spawn entities for a structure (used on first visit + forced spawn)
-    void spawn_structure_entities(Chunk& chunk, int cx, int cy, StructureType stype);
+    // Spawn a structure's NPCs/enemies. Called once, on a chunk's first visit.
+    void spawn_structure_entities(int cx, int cy, StructureType stype);
 
     // ── Zones ─────────────────────────────────────────────────────
     void add_zone(const Zone& z);
@@ -156,36 +164,70 @@ public:
     const std::vector<Zone>& zones() const { return zones_; }
     void clear_zones() { zones_.clear(); }
 
-    // Per-chunk save/load support
+    // ── Per-chunk persistence ───────────────────────────────────────
+    //
+    // Terrain is reproducible from the seed, so only the parts that aren't
+    // are retained: explored bits, player tile deltas, player-placed objects
+    // and live entity state. These are archived when a chunk unloads and
+    // replayed when it comes back, which is what makes a wall you built five
+    // chunks ago still there when you walk home.
+
     struct ChunkSaveData {
-        int cx, cy;
+        int cx = 0, cy = 0;
         std::vector<bool> explored;
         std::vector<TileMod> modifications;
         std::vector<PlacedObject> placed_objects;
     };
+
+    // Terrain/exploration state for every chunk that has been visited,
+    // whether it is currently loaded or archived.
     std::vector<ChunkSaveData> gather_save_data() const;
+
+    // Stage terrain/exploration state for a chunk. Applied immediately if the
+    // chunk is loaded, otherwise archived until it is next generated.
     void apply_save_data(const ChunkSaveData& data);
 
-    // Entity save/load
     struct ChunkEntitySaveData {
-        int cx, cy;
+        int cx = 0, cy = 0;
         std::vector<Entity> items;
         std::vector<Npc> npcs;
         std::vector<Enemy> enemies;
     };
+
     std::vector<ChunkEntitySaveData> gather_entity_save_data() const;
-    void apply_entity_save_data(const std::vector<ChunkEntitySaveData>& data);
+
+    // Stage entity state for a chunk, replacing whatever is there.
+    void apply_entity_save_data(const ChunkEntitySaveData& data);
+
+    // True once a chunk has been generated or restored at least once. Used to
+    // decide whether to spawn fresh biome/structure entities.
+    bool is_chunk_known(int cx, int cy) const;
 
 private:
+    // Everything about a chunk that generation cannot reproduce.
+    struct ChunkArchive {
+        std::vector<bool> explored;
+        std::vector<TileMod> modifications;
+        std::vector<PlacedObject> placed_objects;
+        ChunkEntities entities;
+    };
+
+    void archive_chunk(ChunkCoord key);
+    void restore_chunk_terrain(ChunkCoord key, Chunk& chunk);
+    void restore_chunk(ChunkCoord key, Chunk& chunk);
+    void generate_chunk_contents(ChunkCoord key, Chunk& chunk);
+    void reconcile_radii();
+
+    // Helpers for first-visit chunk setup
+    void spawn_biome_entities(Chunk& chunk, int cx, int cy);
+
     uint32_t seed_ = 0;
-    int load_radius_ = 2;
+    int load_radius_ = 3;
     int render_radius_ = 2;
     int sim_radius_ = 1;
 
     std::unordered_map<ChunkCoord, Chunk, ChunkCoordHash> chunks_;
     std::unordered_map<ChunkCoord, ChunkEntities, ChunkCoordHash> entities_;
+    std::unordered_map<ChunkCoord, ChunkArchive, ChunkCoordHash> archive_;
     std::vector<Zone> zones_;
-
-    // Helpers for first-visit chunk setup
-    void spawn_biome_entities(Chunk& chunk, int cx, int cy);
 };

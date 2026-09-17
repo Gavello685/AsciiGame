@@ -29,7 +29,7 @@ public:
     std::string time_string() const;
     std::string time_period_string() const;
 
-    static const int CYCLE_LENGTH = 600;
+    static constexpr int CYCLE_LENGTH = 600;
 
 private:
     int turn_ = 150; // Start at midday (turn 150 = Day phase)
