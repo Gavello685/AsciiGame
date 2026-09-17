@@ -49,7 +49,7 @@ Arrow keys and WASD are interchangeable throughout.
 
 | Overlay | Keys |
 |---------|------|
-| Inventory | Up/Down select, Enter open actions, Left/Right pick an action, Tab switch to the paper doll, Escape or `I` close |
+| Inventory | Up/Down select, Enter open actions, Left/Right pick an action, Enter on Equip opens a left/right slot picker for paired items, Tab switch to the paper doll, Escape or `I` close |
 | Crafting | Up/Down select, Enter craft, Escape or `C` close |
 | Build | WASD move the cursor (within 6 tiles), Tab or `]`/`[` cycle buildables, Enter place, Escape or `B` exit |
 | Zone | WASD move the cursor, Enter mark a corner then the opposite corner, Enter again to pick a type, `X` delete the zone under the cursor, Escape or `Z` back out one step |
@@ -111,7 +111,7 @@ cmake --build build --target ascii_game_tests
 ./build/ascii_game_tests
 ```
 
-129 tests over chunk coordinates, tile persistence across chunk unload, the
+136 tests over chunk coordinates, tile persistence across chunk unload, the
 save round-trip and its JSON validity, entity archetypes, crafting and
 building, world radius invariants, turn resolution, the RNG, the session
 lifecycle, and every input path. CI runs them under GCC and Clang and again

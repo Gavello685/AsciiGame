@@ -124,6 +124,7 @@ void render(Renderer& renderer, const Window& window, Session& session,
         case ui::GameMode::Inventory:
         case ui::GameMode::InventoryAction:
         case ui::GameMode::InventoryExamine:
+        case ui::GameMode::EquipSelect:
         case ui::GameMode::GiftSelect:
             ui::draw_inventory(renderer, session.player, state, view);
             break;

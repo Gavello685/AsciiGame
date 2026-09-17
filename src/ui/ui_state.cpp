@@ -18,6 +18,13 @@ const char* const EQUIP_SLOT_NAMES[] = {
 const int NUM_EQUIP_SLOTS =
     static_cast<int>(sizeof(EQUIP_SLOTS) / sizeof(EQUIP_SLOTS[0]));
 
+const char* equip_slot_name(EquipSlot slot) {
+    for (int i = 0; i < NUM_EQUIP_SLOTS; ++i) {
+        if (EQUIP_SLOTS[i] == slot) return EQUIP_SLOT_NAMES[i];
+    }
+    return "-";
+}
+
 const char* const MAIN_MENU_OPTIONS[] = {"New Game", "Load Game", "Quit"};
 const int MAIN_MENU_OPTION_COUNT =
     static_cast<int>(sizeof(MAIN_MENU_OPTIONS) / sizeof(MAIN_MENU_OPTIONS[0]));

@@ -1,6 +1,7 @@
 #include "test_framework.h"
 
 #include "game/enemy.h"
+#include "game/item.h"
 #include "game/npc.h"
 #include "game/session.h"
 #include "game/trade.h"
@@ -86,7 +87,15 @@ int index_of(const Player& player, const std::string& name) {
 // column an action sits in depends on the item, so the position is looked up
 // rather than assumed.
 bool choose_action(Harness& h, int inventory_index, ui::ItemAction wanted) {
-    h.press(Key::I);
+    // I toggles the inventory closed, so a second call from an already-open
+    // overlay would drop back to play and the following Enter would talk
+    // rather than pick an action. Walk back to the item list first.
+    if (h.ui.mode == GameMode::EquipSelect) h.press(Key::Escape);
+    if (h.ui.mode == GameMode::InventoryAction) h.press(Key::Escape);
+    if (h.ui.mode == GameMode::InventoryExamine) h.press(Key::Escape);
+    if (h.ui.mode != GameMode::Inventory) h.press(Key::I);
+    if (h.ui.mode != GameMode::Inventory) return false;
+
     h.ui.inv_cursor = inventory_index;
     h.press(Key::Enter);
     if (h.ui.mode != GameMode::InventoryAction) return false;
@@ -432,10 +441,99 @@ TEST(equipping_from_the_inventory_fills_the_slot) {
     int attack_before = h.session.player.total_attack();
 
     CHECK(choose_action(h, sword, ui::ItemAction::Equip));
+    // A weapon can go in either hand, so Equip opens the slot picker.
+    CHECK_EQ(static_cast<int>(h.ui.mode), static_cast<int>(GameMode::EquipSelect));
+    h.press(Key::Enter);
 
     CHECK(h.session.player.total_attack() > attack_before);
     CHECK_EQ(inventory_count(h.session.player, "Iron Sword"), 0);
+    CHECK(h.session.player.equipped_at(EquipSlot::Hand_L) != nullptr);
     CHECK(h.logged("Equipped Iron Sword"));
+}
+
+TEST(a_one_slot_item_equips_without_asking) {
+    Harness h;
+    h.start();
+
+    int armor = index_of(h.session.player, "Leather Armor");
+    CHECK(armor >= 0);
+    if (armor < 0) return;
+
+    CHECK(choose_action(h, armor, ui::ItemAction::Equip));
+
+    CHECK_EQ(static_cast<int>(h.ui.mode), static_cast<int>(GameMode::Inventory));
+    CHECK(h.session.player.equipped_at(EquipSlot::Torso) != nullptr);
+    CHECK_EQ(inventory_count(h.session.player, "Leather Armor"), 0);
+}
+
+TEST(equip_select_puts_a_paired_item_in_the_other_hand) {
+    Harness h;
+    h.start();
+
+    int sword = index_of(h.session.player, "Iron Sword");
+    int torch = index_of(h.session.player, "Torch");
+    CHECK(sword >= 0 && torch >= 0);
+    if (sword < 0 || torch < 0) return;
+
+    CHECK(choose_action(h, sword, ui::ItemAction::Equip));
+    h.press(Key::Enter);
+    CHECK(h.session.player.equipped_at(EquipSlot::Hand_L) != nullptr);
+
+    // Torch also names Hand_L, which is occupied, so the picker should land
+    // on the empty right hand.
+    torch = index_of(h.session.player, "Torch");
+    CHECK(choose_action(h, torch, ui::ItemAction::Equip));
+    CHECK_EQ(static_cast<int>(h.ui.mode), static_cast<int>(GameMode::EquipSelect));
+    CHECK_EQ(static_cast<int>(h.ui.equip_options[h.ui.equip_choice]),
+             static_cast<int>(EquipSlot::Hand_R));
+    h.press(Key::Enter);
+
+    const Item* left = h.session.player.equipped_at(EquipSlot::Hand_L);
+    const Item* right = h.session.player.equipped_at(EquipSlot::Hand_R);
+    CHECK(left != nullptr && right != nullptr);
+    if (!left || !right) return;
+    CHECK_EQ(left->name(), std::string("Iron Sword"));
+    CHECK_EQ(right->name(), std::string("Torch"));
+}
+
+TEST(equip_select_escape_leaves_the_item_in_inventory) {
+    Harness h;
+    h.start();
+
+    int sword = index_of(h.session.player, "Iron Sword");
+    CHECK(sword >= 0);
+    if (sword < 0) return;
+
+    CHECK(choose_action(h, sword, ui::ItemAction::Equip));
+    CHECK_EQ(static_cast<int>(h.ui.mode), static_cast<int>(GameMode::EquipSelect));
+    h.press(Key::Escape);
+
+    CHECK_EQ(static_cast<int>(h.ui.mode), static_cast<int>(GameMode::InventoryAction));
+    CHECK_EQ(inventory_count(h.session.player, "Iron Sword"), 1);
+    CHECK(h.session.player.equipped_at(EquipSlot::Hand_L) == nullptr);
+}
+
+TEST(a_gold_ring_can_go_on_either_hand) {
+    Harness h;
+    h.start();
+
+    const Item* ring = find_item("Gold Ring");
+    CHECK(ring != nullptr);
+    if (!ring) return;
+    h.session.player.add_item(*ring);
+
+    int index = index_of(h.session.player, "Gold Ring");
+    CHECK(choose_action(h, index, ui::ItemAction::Equip));
+    CHECK_EQ(static_cast<int>(h.ui.mode), static_cast<int>(GameMode::EquipSelect));
+    // Named slot is Hand_R; listed after L Hand, so Down then Enter.
+    h.press(Key::Up);   // L Hand
+    h.press(Key::Enter);
+
+    const Item* left = h.session.player.equipped_at(EquipSlot::Hand_L);
+    CHECK(left != nullptr);
+    if (!left) return;
+    CHECK_EQ(left->name(), std::string("Gold Ring"));
+    CHECK_EQ(inventory_count(h.session.player, "Gold Ring"), 0);
 }
 
 TEST(dropping_an_item_leaves_it_on_the_floor) {
@@ -942,7 +1040,8 @@ TEST(unknown_keys_are_ignored_in_every_mode) {
 
     const GameMode modes[] = {
         GameMode::Normal, GameMode::Inventory, GameMode::InventoryAction,
-        GameMode::InventoryExamine, GameMode::GiftSelect, GameMode::Dialogue,
+        GameMode::InventoryExamine, GameMode::EquipSelect, GameMode::GiftSelect,
+        GameMode::Dialogue,
         GameMode::PauseMenu, GameMode::SaveGame, GameMode::LoadGame,
         GameMode::Settings, GameMode::Craft, GameMode::Build, GameMode::Zone,
         GameMode::Character, GameMode::Map, GameMode::Dead, GameMode::MainMenu,

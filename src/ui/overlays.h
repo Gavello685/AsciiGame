@@ -9,7 +9,7 @@ class World;
 namespace ui {
 
 // Item list, paper doll, and — depending on the mode — the action bar, the
-// examine card or the gift picker layered on top.
+// examine card, the slot picker or the gift picker layered on top.
 void draw_inventory(Renderer& r, const Player& player, const UiState& ui,
                     const Viewport& view);
 

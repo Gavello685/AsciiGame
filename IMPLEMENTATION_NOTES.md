@@ -281,7 +281,7 @@ steps rather than a scan for mutated locals.
 
 ### Tests and CI
 
-129 tests across 11 suites, from 0. The two largest are `test_input`, which
+136 tests across 11 suites, from 0. The two largest are `test_input`, which
 drives menus, movement, combat, gathering, inventory, building, zoning,
 crafting, the affinity gates, trade and the overlay cursors through
 `handle_key`, and `test_save_roundtrip`, which asserts every field survives a
@@ -291,15 +291,32 @@ ASan and UBSan, and builds the game against SDL2. Warnings are
 
 ### What still needs doing
 
-- The inventory equip path ignores `Item::partner_slot()`, so a two-slot item
-  (a ring, say) always takes the slot named in the database rather than asking
-  which hand. DESIGN.md describes an EquipSelect step that does not exist.
-- `Torch` is documented as burning out; it does not.
-- `Chunk::dirty()` is tracked but nothing reads it — the archive keys off
-  whether a chunk was visited instead.
-- The build panel's material column shows counts without names, which is
-  cryptic when a buildable needs two materials.
+- `Torch` is documented as burning out; it does not. Duration is not specified.
 
 ---
 
-## Session 7 (Next): Milestone 5 Settlement
+## Session 7: EquipSelect, build labels
+
+`DESIGN.md` described an EquipSelect step for items that fit more than one
+slot (Gold Ring on either hand). Equip always used `Item::equip_slot()`, so
+a sword and a torch — both named `Hand_L` — could not be held at once, and
+boots only ever filled the left foot. Choosing Equip now opens a two-row
+picker when `partner_slot` is set; unique slots (head, torso) still equip
+immediately. `Player::equip` takes the target slot, copies the item before
+unequipping the occupant (the previous reference dangled if `add_item`
+reallocated), and refuses a slot the item cannot occupy.
+
+The build panel's cost column now uses the same `name have/need` form as
+crafting, so a campfire reads `Wood 0/2, Stone 0/1` rather than `0/2, 0/1`.
+
+`Chunk::dirty()` stays as a "has player edits" flag. The archive keys off
+visited chunks on purpose: explored tiles have to survive even when nothing
+was built.
+
+### What still needs doing
+
+- `Torch` is documented as burning out; it does not. Duration is not specified.
+
+---
+
+## Session 8 (Next): Milestone 5 Settlement

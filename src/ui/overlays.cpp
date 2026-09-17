@@ -152,6 +152,42 @@ void draw_examine_card(Renderer& r, const Item& item, int box_x, int box_y,
     draw_string(r, x + 1, y + h - 1, "[ENTER] close", Style{HINT, EXAMINE_BG});
 }
 
+void draw_equip_select(Renderer& r, const Player& player, const UiState& ui,
+                       int box_x, int box_y, int box_w, int box_h) {
+    if (ui.inv_cursor < 0 ||
+        ui.inv_cursor >= static_cast<int>(player.inventory().size())) {
+        return;
+    }
+
+    const Item& item = player.inventory_item(ui.inv_cursor);
+    const int w = 36, h = 7;
+    int x = box_x + (box_w - w) / 2;
+    int y = box_y + (box_h - h) / 2;
+
+    draw_box(r, x, y, w, h, EXAMINE_BG);
+    draw_string(r, x + 1, y, "Equip " + item.name() + " to:",
+                Style{TITLE, EXAMINE_BG});
+
+    for (int i = 0; i < 2; ++i) {
+        EquipSlot slot = ui.equip_options[i];
+        bool selected = (i == ui.equip_choice);
+        Colour bg = selected ? Colour{60, 60, 50} : EXAMINE_BG;
+        int row_y = y + 2 + i;
+
+        std::string label = equip_slot_name(slot);
+        const Item* occupant = player.equipped_at(slot);
+        if (occupant) {
+            label += "  (" + occupant->name() + ")";
+        } else {
+            label += "  -";
+        }
+        draw_string(r, x + 2, row_y, label, Style{ROW_FG, bg});
+    }
+
+    draw_string(r, x + 1, y + h - 1, "[ENTER] equip  [ESC] back",
+                Style{HINT, EXAMINE_BG});
+}
+
 void draw_gift_picker(Renderer& r, const Player& player, const UiState& ui,
                       int box_x, int box_y, int box_h) {
     const auto& inventory = player.inventory();
@@ -209,6 +245,9 @@ void draw_inventory(Renderer& r, const Player& player, const UiState& ui,
     if (ui.mode == GameMode::InventoryExamine) {
         draw_examine_card(r, ui.examine_item, box_x, box_y, box_w, box_h);
     }
+    if (ui.mode == GameMode::EquipSelect) {
+        draw_equip_select(r, player, ui, box_x, box_y, box_w, box_h);
+    }
     if (ui.mode == GameMode::GiftSelect) {
         draw_gift_picker(r, player, ui, box_x, box_y, box_h);
     }
@@ -264,7 +303,7 @@ void draw_craft(Renderer& r, const Player& player, const UiState& ui,
 
 void draw_build_panel(Renderer& r, const Player& player, const UiState& ui) {
     const int count = static_cast<int>(BuildTile::Count);
-    const int box_w = 34;
+    const int box_w = 44;
     int box_h = count + 4;
     const int box_x = 1, box_y = 1;
 
@@ -284,15 +323,17 @@ void draw_build_panel(Renderer& r, const Player& player, const UiState& ui) {
         draw_string(r, box_x + 3, y, def.name,
                     Style{affordable ? Colour{220, 220, 220} : DISABLED, bg});
 
-        // Material cost as have/need, so a red preview is self-explanatory.
+        // Same "name have/need" form as the crafting panel, so two-material
+        // rows (campfire) are readable rather than a bare "0/2, 0/1".
         std::string cost;
         for (size_t m = 0; m < def.materials.size(); ++m) {
-            if (m > 0) cost += ",";
+            if (m > 0) cost += ", ";
             const auto& [material, needed] = def.materials[m];
-            cost += " " + std::to_string(craft_count_of(player, material)) + "/" +
+            cost += std::string(material) + " " +
+                    std::to_string(craft_count_of(player, material)) + "/" +
                     std::to_string(needed);
         }
-        draw_string(r, box_x + 17, y, cost, Style{Colour{150, 150, 130}, bg});
+        draw_string(r, box_x + 16, y, cost, Style{Colour{150, 150, 130}, bg});
     }
 
     draw_string(r, box_x + 1, box_y + box_h - 1, "[TAB] pick [ENT] build",
